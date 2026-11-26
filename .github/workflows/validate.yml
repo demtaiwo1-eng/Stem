@@ -1,0 +1,29 @@
+name: Validate STEM engine
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate Node syntax
+        run: |
+          node --check server.js
+          node --check public/app.js
+      - name: Validate Python syntax
+        run: python -m py_compile worker.py
+      - name: Validate project metadata
+        run: |
+          node -e "const p=require('./package.json'); if(!p.dependencies.express || !p.dependencies.multer) process.exit(1)"
+          test -s requirements.txt
+          grep -q '^demucs==' requirements.txt
