@@ -1,10 +1,22 @@
 {
   "name": "stem-audio-workbench",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Self-hosted audio stem separation workbench",
+  "description": "Neon-backed audio stem separation workbench",
   "main": "server.js",
-  "scripts": { "start": "node server.js", "dev": "node --watch server.js" },
-  "engines": { "node": ">=20" },
-  "dependencies": { "archiver": "^7.0.1", "cors": "^2.8.5", "express": "^4.21.2", "multer": "^1.4.5-lts.1", "uuid": "^11.0.5" }
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.850.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.16.3"
+  }
 }
