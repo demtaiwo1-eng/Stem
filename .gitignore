@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.neon
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+/data/
+/stem-jobs/
