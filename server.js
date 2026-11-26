@@ -187,9 +187,6 @@ app.post("/api/jobs", upload.single("audio"), asyncRoute(async (req, res) => {
       "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model) VALUES ($1,$2,'queued',3,'Upload stored. Waiting for the audio worker…',$3,$4)",
       [id, originalName, inputKey, MODEL]
     );
-  } catch (error) {
-    await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: inputKey })).catch(() => {});
-    throw error;
   } finally {
     await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
   }
