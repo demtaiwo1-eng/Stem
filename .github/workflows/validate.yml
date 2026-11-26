@@ -24,6 +24,7 @@ jobs:
         run: python -m py_compile worker.py
       - name: Validate project metadata
         run: |
-          node -e "const p=require('./package.json'); if(!p.dependencies.express || !p.dependencies.multer) process.exit(1)"
+          node -e "const p=require('./package.json'); if(!p.dependencies.express || !p.dependencies.pg || !p.dependencies['@aws-sdk/client-s3']) process.exit(1)"
           test -s requirements.txt
+          test -s db/schema.sql
           grep -q '^demucs==' requirements.txt
