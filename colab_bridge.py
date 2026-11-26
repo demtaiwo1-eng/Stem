@@ -15,7 +15,7 @@ lock = threading.Lock()
 allowed = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
-CORS(app, resources={r"/*": {"origins": "*", "allow_headers": ["Content-Type", "X-STEM-Token"], "methods": ["GET", "POST", "OPTIONS"]}})
+CORS(app, resources={r"/*": {"origins": "*", "allow_headers": ["Content-Type", "X-STEM-Token", "cf-skip-browser-warning"], "methods": ["GET", "POST", "OPTIONS"]}})
 
 def authorized():
     return bool(TOKEN) and request.headers.get("X-STEM-Token", "") == TOKEN
