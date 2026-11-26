@@ -1,10 +1,12 @@
-import json, os, shutil, subprocess, sys, time, zipfile
+import array, json, math, os, shutil, subprocess, sys, time, zipfile
 from pathlib import Path
 
 source = Path(sys.argv[1]).resolve()
 job_dir = Path(sys.argv[2]).resolve()
 job_id = sys.argv[3]
-model = os.environ.get("STEM_MODEL", "htdemucs_6s")
+primary_model = os.environ.get("STEM_MODEL", "htdemucs_6s")
+fallback_model = os.environ.get("STEM_VOCAL_FALLBACK_MODEL", "htdemucs")
+device = os.environ.get("STEM_DEVICE", "cpu")
 sep_root = job_dir / "separated"
 out_dir = job_dir / "deliverables"
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -17,63 +19,160 @@ def duration_of(file):
     result = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(file)], text=True)
     return float(result.strip())
 
-def main():
-    duration = duration_of(source)
-    print("Checking audio duration and preparing Demucs separation…", flush=True)
-    run([sys.executable, "-m", "demucs", "-n", model, "--device", os.environ.get("STEM_DEVICE", "cpu"), "--out", str(sep_root), str(source)])
+def audio_metrics(file):
+    # Decode to mono float PCM for consistent, dependency-light diagnostics.
+    raw = subprocess.check_output([
+        "ffmpeg", "-v", "error", "-i", str(file), "-f", "f32le",
+        "-acodec", "pcm_f32le", "-ac", "1", "-ar", "22050", "pipe:1"
+    ])
+    samples = array.array("f")
+    samples.frombytes(raw[:len(raw) - (len(raw) % samples.itemsize)])
+    if not samples:
+        return {"rms_dbfs": -120.0, "peak_dbfs": -120.0, "near_silence_percent": 100.0}
+    squares = 0.0
+    peak = 0.0
+    silent = 0
+    for value in samples:
+        v = abs(value)
+        squares += value * value
+        peak = max(peak, v)
+        if v < 0.000316:  # approximately -70 dBFS
+            silent += 1
+    rms = math.sqrt(squares / len(samples))
+    db = lambda x: round(20 * math.log10(max(x, 1e-6)), 2)
+    return {
+        "rms_dbfs": db(rms),
+        "peak_dbfs": db(peak),
+        "near_silence_percent": round(100.0 * silent / len(samples), 2)
+    }
+
+def run_model(model):
+    print("Starting separation model: " + model, flush=True)
+    run([sys.executable, "-m", "demucs", "-n", model, "--device", device, "--out", str(sep_root), str(source)])
     track_dir = sep_root / model / source.stem
     if not track_dir.exists():
         candidates = list((sep_root / model).glob("*"))
         if not candidates:
-            raise RuntimeError("Demucs did not produce a track folder.")
+            raise RuntimeError("Demucs did not produce a track folder for " + model)
         track_dir = candidates[0]
+    return track_dir
+
+def main():
+    duration = duration_of(source)
+    print("Source duration: %.6f seconds" % duration, flush=True)
+    primary_dir = run_model(primary_model)
     stems = ["vocals", "drums", "bass", "guitar", "piano", "other"]
+    primary_vocal = primary_dir / "vocals.wav"
+    chosen_vocal = primary_vocal if primary_vocal.exists() else None
+    vocal_checks = []
+    if chosen_vocal:
+        primary_metrics = audio_metrics(chosen_vocal)
+        vocal_checks.append({"model": primary_model, **primary_metrics, "selected": True})
+        print("Primary vocal diagnostics:", primary_metrics, flush=True)
+        # Blank/near-silent vocal estimates trigger an independent 4-stem model pass.
+        if primary_metrics["rms_dbfs"] < -48.0 or primary_metrics["near_silence_percent"] > 98.0:
+            print("Vocal estimate looks unusually quiet; trying fallback model " + fallback_model, flush=True)
+            try:
+                fallback_dir = run_model(fallback_model)
+                fallback_vocal = fallback_dir / "vocals.wav"
+                if fallback_vocal.exists():
+                    fallback_metrics = audio_metrics(fallback_vocal)
+                    use_fallback = fallback_metrics["rms_dbfs"] > primary_metrics["rms_dbfs"] + 3.0
+                    vocal_checks[0]["selected"] = not use_fallback
+                    vocal_checks.append({"model": fallback_model, **fallback_metrics, "selected": use_fallback})
+                    if use_fallback:
+                        chosen_vocal = fallback_vocal
+                    print("Fallback vocal diagnostics:", fallback_metrics, "| selected:", use_fallback, flush=True)
+                else:
+                    print("Fallback model did not produce a vocals.wav file.", flush=True)
+            except Exception as error:
+                print("Fallback model could not complete:", str(error), flush=True)
+    else:
+        print("Primary model did not produce vocals.wav; trying fallback model.", flush=True)
+        try:
+            fallback_dir = run_model(fallback_model)
+            fallback_vocal = fallback_dir / "vocals.wav"
+            if fallback_vocal.exists():
+                chosen_vocal = fallback_vocal
+                fallback_metrics = audio_metrics(fallback_vocal)
+                vocal_checks.append({"model": fallback_model, **fallback_metrics, "selected": True})
+        except Exception as error:
+            print("Fallback vocal recovery failed:", str(error), flush=True)
+
     manifest = {
         "application": "STEM Audio Workbench",
         "job_id": job_id,
         "source_file": source.name,
         "source_duration_seconds": round(duration, 6),
-        "model": model,
+        "model": primary_model,
         "separation_engine": "Demucs",
+        "vocal_recovery": {
+            "fallback_model": fallback_model,
+            "attempted": len(vocal_checks) > 1,
+            "candidates": vocal_checks,
+            "selected_model": next((x["model"] for x in vocal_checks if x.get("selected")), None),
+            "note": "A higher vocal RMS is only a diagnostic signal, not proof of cleaner vocals. Listen and compare against the original."
+        },
         "stems": [],
+        "mix": None,
         "limitations": [
-            "The six outputs are model estimates, not guaranteed studio multitracks.",
-            "Backing vocals, ad-libs, individual drum pieces, synth layers, strings, brass, ambience and effects are not guaranteed to be isolated separately.",
-            "Some source material may bleed between stems; the 'other' stem contains accompaniment not assigned to the named source classes."
+            "Separated stems are model estimates, not recovered studio multitracks.",
+            "If a vocal is absent or masked in the source, AI separation cannot guarantee recovery.",
+            "Alternative-model selection uses signal level diagnostics; it does not automatically prove perceptual quality.",
+            "Generated replacement music is not part of this separation pass and must be labelled separately.",
+            "Backing vocals, ad-libs, individual drum pieces, synth layers, strings, brass, ambience and effects are not guaranteed to be isolated."
         ]
     }
     for stem in stems:
-        wav = track_dir / (stem + ".wav")
-        if not wav.exists():
+        wav = (chosen_vocal if stem == "vocals" else primary_dir / (stem + ".wav"))
+        if not wav or not wav.exists():
             continue
         target_wav = out_dir / (stem + ".wav")
         target_mp3 = out_dir / (stem + ".mp3")
-        # Force every export to the source's exact duration and a common stereo 44.1 kHz format.
         common = ["-af", "aresample=44100:async=1:first_pts=0,apad", "-t", f"{duration:.6f}", "-ac", "2", "-ar", "44100"]
         run(["ffmpeg", "-y", "-i", str(wav), *common, "-c:a", "pcm_s16le", str(target_wav)])
         run(["ffmpeg", "-y", "-i", str(target_wav), "-c:a", "libmp3lame", "-b:a", "320k", str(target_mp3)])
-        manifest["stems"].append({"name": stem, "wav": target_wav.name, "mp3": target_mp3.name, "duration_seconds": round(duration, 6), "sample_rate_hz": 44100, "channels": 2})
-        print("Exported " + stem + " in WAV and MP3.", flush=True)
+        metrics = audio_metrics(target_wav)
+        manifest["stems"].append({
+            "name": stem, "wav": target_wav.name, "mp3": target_mp3.name,
+            "duration_seconds": round(duration, 6), "sample_rate_hz": 44100,
+            "channels": 2, "signal_diagnostics": metrics
+        })
+        print("Exported", stem, "|", metrics, flush=True)
     if not manifest["stems"]:
-        raise RuntimeError("No expected stems were produced by the selected model.")
+        raise RuntimeError("No expected stems were produced by the selected models.")
+
+    # Create an editable stem-sum preview, not a claim of a mastered or exact original mix.
+    available = [out_dir / (name + ".wav") for name in stems if (out_dir / (name + ".wav")).exists()]
+    mix_path = out_dir / "reconstructed-stem-sum-preview.wav"
+    inputs = []
+    for item in available:
+        inputs.extend(["-i", str(item)])
+    filter_graph = f"amix=inputs={len(available)}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95"
+    run(["ffmpeg", "-y", *inputs, "-filter_complex", filter_graph, "-t", f"{duration:.6f}", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", str(mix_path)])
+    mix_mp3 = out_dir / "reconstructed-stem-sum-preview.mp3"
+    run(["ffmpeg", "-y", "-i", str(mix_path), "-c:a", "libmp3lame", "-b:a", "320k", str(mix_mp3)])
+    manifest["mix"] = {
+        "wav": mix_path.name, "mp3": mix_mp3.name,
+        "duration_seconds": round(duration, 6),
+        "type": "stem-sum preview",
+        "note": "A simple sum of separated stems with peak limiting. It is not a professionally mastered mix and may differ from the original."
+    }
     shutil.copy2(source, out_dir / ("original-reference" + source.suffix.lower()))
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     readme = """# STEM result pack
 
-This archive contains the original reference recording and model-separated audio stems.
-All exported stems are rendered as stereo 44.1 kHz WAV (16-bit PCM) and MP3 (320 kbps), trimmed/padded to the source recording duration.
+This archive contains the original reference, model-separated audio stems, signal diagnostics, and a simple stem-sum preview. WAV files are stereo 44.1 kHz PCM; MP3 files are 320 kbps. Exports are trimmed/padded to the source duration.
 
-## Stem guide
-- vocals: vocal content estimated by the model (lead and backing vocals may remain mixed).
-- drums: percussion/drum content estimated by the model.
-- bass: bass-range musical content estimated by the model.
-- guitar: guitar-like content estimated by the model.
-- piano: piano-like content estimated by the model.
-- other: remaining accompaniment and sounds not assigned to the named classes.
+## Vocal recovery
+If the primary six-stem vocal estimate looked nearly silent, STEM also tries a second Demucs model and compares signal-level diagnostics. This is a recovery attempt, not a guarantee of a clean vocal. Check vocal_candidates in manifest.json and listen to the chosen stem against the original.
+
+## Mix preview
+reconstructed-stem-sum-preview is a simple sum of the available stems with peak limiting. It is not a professionally mixed or mastered song and may contain bleed or artifacts.
 
 ## Important limits
-These are AI source-separation estimates, not original multitrack recordings. Bleed and artifacts are possible. The model does not promise separate lead/backing vocals, ad-libs, kick/snare/cymbals, individual synths, strings, brass, or reverb/delay returns. Listen to each stem and compare with the original before using it in a mix.
-See manifest.json for model and duration metadata.
+These are AI separation estimates, not original multitrack recordings. Missing source information cannot be recreated by separation alone. Generated replacement passages must be produced separately and labelled as generated material.
+See manifest.json for models, duration and diagnostics.
 """
     (out_dir / "README.txt").write_text(readme, encoding="utf-8")
     zip_path = job_dir / "stem-results.zip"
