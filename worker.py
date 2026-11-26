@@ -20,7 +20,7 @@ def duration_of(file):
 def main():
     duration = duration_of(source)
     print("Checking audio duration and preparing Demucs separation…", flush=True)
-    run(["python3", "-m", "demucs", "-n", model, "--device", os.environ.get("STEM_DEVICE", "cpu"), "--out", str(sep_root), str(source)])
+    run([sys.executable, "-m", "demucs", "-n", model, "--device", os.environ.get("STEM_DEVICE", "cpu"), "--out", str(sep_root), str(source)])
     track_dir = sep_root / model / source.stem
     if not track_dir.exists():
         candidates = list((sep_root / model).glob("*"))
