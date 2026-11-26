@@ -16,10 +16,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Validate Node syntax
+      - name: Install Node dependencies
+        run: npm install --omit=dev
+      - name: Validate Node syntax and dependencies
         run: |
           node --check server.js
           node --check public/app.js
+          node -e "require('express'); require('cors'); require('multer'); require('pg'); require('@aws-sdk/client-s3')"
       - name: Validate Python syntax
         run: python -m py_compile worker.py
       - name: Validate project metadata
