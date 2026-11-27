@@ -192,6 +192,23 @@ def main():
     if not manifest["stems"]:
         raise RuntimeError("No expected stems were produced by the selected models.")
 
+    # Process separately supplied vocal/voice files as alternate reference tracks.
+    supplied_vocal_outputs = []
+    for ref_file in supplied_assets:
+        if ref_file.resolve() == source.resolve():
+            continue
+        lower_name = ref_file.stem.lower()
+        if not any(term in lower_name for term in ("vocal", "voice", "acapella", "a-cappella", "lead", "backing")):
+            continue
+        safe_stem = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in ref_file.stem)[:70] or "reference"
+        ref_wav = out_dir / ("provided-vocal-" + safe_stem + "-enhanced.wav")
+        ref_mp3 = out_dir / ("provided-vocal-" + safe_stem + "-enhanced.mp3")
+        enhancement_filter = "highpass=f=75,lowpass=f=16500,acompressor=threshold=0.12:ratio=2.2:attack=15:release=180:makeup=1.2,alimiter=limit=0.95"
+        run(["ffmpeg", "-y", "-i", str(ref_file), "-af", enhancement_filter, "-t", f"{duration:.6f}", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", str(ref_wav)])
+        run(["ffmpeg", "-y", "-i", str(ref_wav), "-c:a", "libmp3lame", "-b:a", "320k", str(ref_mp3)])
+        supplied_vocal_outputs.append({"source_file": ref_file.name, "wav": ref_wav.name, "mp3": ref_mp3.name, "duration_seconds": round(duration, 6)})
+    manifest["provided_vocal_tracks"] = supplied_vocal_outputs
+
     # Optional conservative vocal polish. Keep the untouched recovered vocal as well.
     vocal_wav = out_dir / "vocals.wav"
     if vocal_wav.exists():
