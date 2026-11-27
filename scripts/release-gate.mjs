@@ -242,6 +242,7 @@ async function main() {
   required('STEM_DEPLOY_COMMAND');
   if (!API_BASE.startsWith('https://')) fail('STEM_API_BASE must be an HTTPS URL.');
   if (!GH_TOKEN) fail('A GitHub token with contents:write access to ' + FRONTEND_REPO + ' is required.');
+  if (!PAID_E2E) fail('Full conversion verification is disabled. Re-run the workflow with run_paid_e2e=true only when FAL usage charges are approved. No deployment was started.');
 
   log('Running backend syntax/dependency checks.');
   const check = spawn('npm', ['run', 'check'], { stdio: 'inherit' });
