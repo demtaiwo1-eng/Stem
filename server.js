@@ -212,6 +212,7 @@ async function finishFalJob(job) {
     const manifestFiles = await Promise.all(files.map(async file => ({
       stem: file.stem,
       fileName: file.fileName,
+      objectKey: file.objectKey,
       sizeBytes: file.sizeBytes,
       contentType: file.contentType,
       downloadUrl: await getSignedUrl(s3, new GetObjectCommand({
@@ -335,7 +336,14 @@ app.get('/api/jobs/:id/results', asyncRoute(async (req, res) => {
   const job = result.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
   if (job.status !== 'completed' || !job.result_manifest) return res.status(409).json({ error: 'Results are not ready.' });
-  res.json(job.result_manifest);
+  const files = await Promise.all((job.result_manifest.files || []).map(async file => ({
+    ...file,
+    downloadUrl: await getSignedUrl(s3, new GetObjectCommand({
+      Bucket: BUCKET,
+      Key: file.objectKey
+    }), { expiresIn: 60 * 60 })
+  })));
+  res.json({ ...job.result_manifest, files });
 }));
 
 app.get('/api/jobs/:id/download', asyncRoute(async (req, res) => {
