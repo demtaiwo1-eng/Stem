@@ -428,7 +428,7 @@ async function processFalJob(id) {
 app.get('/health', asyncRoute(async (_req, res) => {
   await pool.query('SELECT 1');
   res.json({
-    ok: true,
+    ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && FAL_API_KEY),
     service: 'STEM Audio Workbench',
     version: '3.0.0',
     database: 'connected',
@@ -444,6 +444,9 @@ app.get('/api/capabilities', (_req, res) => res.json({
   sources: ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'],
   formats: ['wav', 'mp3'],
   maxUploadMB: MAX_UPLOAD_MB,
+  zipUploads: true,
+  maxZipTracks: MAX_ZIP_TRACKS,
+  maxZipUnpackedMB: MAX_ZIP_UNPACKED_MB,
   persistentJobs: true,
   objectStorage: 'Neon Object Storage',
   note: 'Source separation is an estimate. Complex mixes may contain bleed between stems.'
