@@ -265,10 +265,12 @@ async function submitFalJob(job) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      audio_url: audioUrl,
-      model: MODEL,
-      stems: ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'],
-      output_format: job.output_format || 'wav'
+      input: {
+        audio_url: audioUrl,
+        model: MODEL,
+        stems: ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'],
+        output_format: job.output_format || 'wav'
+      }
     }),
     signal: AbortSignal.timeout(30000)
   });
