@@ -113,6 +113,18 @@ async function waitForFrontendConfig() {
   }
   fail('GitHub Pages did not publish the API configuration within four minutes.');
 }
+async function checkFrontend() {
+  const page = await (await request(FRONTEND_URL, {}, 'GitHub Pages landing page')).text();
+  if (!page.includes('upload-form') || !page.includes('submit-btn') || !page.includes('audio-file')) {
+    fail('The published landing page is missing the audio upload form or Convert STEM control.');
+  }
+  const appUrl = new URL('app.js', FRONTEND_URL).toString();
+  const app = await (await request(appUrl, {}, 'Published frontend JavaScript')).text();
+  if (!app.includes("form.addEventListener('submit'") || !app.includes("apiFetch('/api/jobs'")) {
+    fail('The published Convert STEM control is not wired to the backend upload endpoint.');
+  }
+  log('Published landing page, upload form and Convert STEM submit handler passed.');
+}
 async function checkService() {
   const health = await (await request(API_BASE + '/health', {}, 'Backend health check')).json();
   if (health.ok !== true || health.database !== 'connected' || health.objectStorage !== true || health.falConfigured !== true) {
@@ -252,6 +264,7 @@ async function main() {
   await runCommand(required('STEM_DEPLOY_COMMAND'));
   await publishFrontendApiBase();
   await waitForFrontendConfig();
+  await checkFrontend();
   await checkService();
   await runPaidEndToEnd();
   log('RELEASE PASS: backend deployed, frontend connected, health verified and live conversions downloaded.');
