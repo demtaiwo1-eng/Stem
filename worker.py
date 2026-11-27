@@ -245,8 +245,9 @@ See manifest.json for models, duration and diagnostics.
     (out_dir / "README.txt").write_text(readme, encoding="utf-8")
     zip_path = job_dir / "stem-results.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        for item in sorted(out_dir.iterdir()):
-            archive.write(item, arcname=item.name)
+        for item in sorted(out_dir.rglob("*")):
+            if item.is_file():
+                archive.write(item, arcname=item.relative_to(out_dir).as_posix())
     print("Finished. Result ZIP created.", flush=True)
 
 if __name__ == "__main__":
