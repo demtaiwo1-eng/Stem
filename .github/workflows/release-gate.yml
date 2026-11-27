@@ -1,0 +1,53 @@
+name: STEM full release and live verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_paid_e2e:
+        description: Run real FAL conversions (WAV, MP3 and ZIP). This may incur FAL usage charges.
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stem-full-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      NODE_ENV: production
+      STEM_API_BASE: \${{ vars.STEM_API_BASE }}
+      STEM_DEPLOY_COMMAND: \${{ secrets.STEM_DEPLOY_COMMAND }}
+      STEM_FRONTEND_GITHUB_TOKEN: \${{ secrets.STEM_FRONTEND_GITHUB_TOKEN }}
+      STEM_FRONTEND_REPO: demtaiwo1-eng/stem.github.io
+      STEM_FRONTEND_BRANCH: main
+      STEM_FRONTEND_URL: https://demtaiwo1-eng.github.io/stem.github.io/
+      STEM_RUN_PAID_E2E: \${{ inputs.run_paid_e2e }}
+      DATABASE_URL: \${{ secrets.STEM_DATABASE_URL }}
+      AWS_ENDPOINT_URL_S3: \${{ vars.STEM_AWS_ENDPOINT_URL_S3 }}
+      AWS_REGION: us-east-2
+      AWS_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: \${{ secrets.STEM_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: \${{ secrets.STEM_AWS_SECRET_ACCESS_KEY }}
+      STEM_BUCKET: stem-audio-private
+      FAL_API_KEY: \${{ secrets.STEM_FAL_API_KEY }}
+    steps:
+      - name: Check out engine
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install production dependencies
+        run: npm install --omit=dev
+      - name: Run full release gate
+        run: node scripts/release-gate.mjs
