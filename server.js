@@ -10,6 +10,7 @@ const { pipeline } = require('node:stream/promises');
 const { PassThrough } = require('node:stream');
 const { Pool } = require('pg');
 const archiver = require('archiver');
+const unzipper = require('unzipper');
 const { Upload } = require('@aws-sdk/lib-storage');
 const {
   S3Client,
@@ -45,6 +46,9 @@ const s3 = new S3Client({
   } : undefined
 });
 const activeJobs = new Set();
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus']);
+const MAX_ZIP_TRACKS = Number(process.env.MAX_ZIP_TRACKS || 20);
+const MAX_ZIP_UNPACKED_MB = Number(process.env.MAX_ZIP_UNPACKED_MB || 1024);
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 300,
@@ -77,8 +81,8 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
   fileFilter: (_req, file, callback) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (!['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus'].includes(ext)) {
-      return callback(new Error('Upload one audio file: MP3, WAV, FLAC, M4A, AAC, OGG or OPUS.'));
+    if (!AUDIO_EXTENSIONS.has(ext) && ext !== '.zip') {
+      return callback(new Error('Upload one audio file or a ZIP containing audio tracks.'));
     }
     callback(null, true);
   }
@@ -139,6 +143,116 @@ async function getObjectStream(key) {
 
 async function signedInputUrl(key) {
   return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn: 60 * 60 * 3 });
+}
+
+
+async function extractZipAudioFiles(zipPath, destination) {
+  const directory = await unzipper.Open.file(zipPath);
+  const entries = directory.files.filter(entry =>
+    entry.type === 'File' && AUDIO_EXTENSIONS.has(path.extname(entry.path).toLowerCase())
+  );
+  if (!entries.length) throw new Error('The ZIP does not contain any supported audio tracks.');
+  if (entries.length > MAX_ZIP_TRACKS) throw new Error('This ZIP exceeds the ' + MAX_ZIP_TRACKS + ' audio-track limit.');
+  const unpackedBytes = entries.reduce((total, entry) => total + Number(entry.uncompressedSize || 0), 0);
+  if (unpackedBytes > MAX_ZIP_UNPACKED_MB * 1024 * 1024) {
+    throw new Error('The uncompressed audio in this ZIP exceeds the ' + MAX_ZIP_UNPACKED_MB + ' MB safety limit.');
+  }
+  await fs.promises.mkdir(destination, { recursive: true });
+  const extracted = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const originalName = safeName(path.basename(entry.path));
+    const localPath = path.join(destination, String(index + 1).padStart(2, '0') + '-' + originalName);
+    await pipeline(entry.stream(), fs.createWriteStream(localPath));
+    extracted.push({ originalName, localPath });
+  }
+  return extracted;
+}
+
+async function downloadObjectToFile(key, destination) {
+  const object = await getObjectStream(key);
+  await pipeline(object.Body, fs.createWriteStream(destination));
+}
+
+async function processZipJob(parentId) {
+  if (activeJobs.has(parentId)) return;
+  activeJobs.add(parentId);
+  let jobDir;
+  try {
+    const parentResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [parentId]);
+    const parent = parentResult.rows[0];
+    if (!parent || ['completed', 'failed'].includes(parent.status)) return;
+    const childResult = await pool.query(
+      'SELECT * FROM public.stem_jobs WHERE parent_job_id = $1 ORDER BY created_at ASC',
+      [parentId]
+    );
+    const children = childResult.rows;
+    if (!children.length) throw new Error('No audio tracks were found in the ZIP package.');
+    for (const child of children) {
+      if (['queued', 'processing'].includes(child.status)) void processFalJob(child.id);
+    }
+    const failed = children.filter(child => child.status === 'failed');
+    if (failed.length) {
+      await updateJob(parentId, {
+        status: 'failed',
+        progress: 100,
+        message: failed.length + ' track(s) could not be separated. Please check the ZIP contents and try again.',
+        error: failed.map(child => child.original_name + ': ' + child.message).join('\\n')
+      });
+      return;
+    }
+    const completed = children.filter(child => child.status === 'completed');
+    const progress = Math.round(children.reduce((total, child) => total + Number(child.progress || 0), 0) / children.length);
+    if (completed.length !== children.length) {
+      await updateJob(parentId, {
+        status: 'processing',
+        progress: Math.min(95, progress),
+        message: 'Separating ' + completed.length + ' of ' + children.length + ' tracks from your ZIP package…'
+      });
+      return;
+    }
+    jobDir = path.join(DATA_DIR, parentId);
+    await fs.promises.mkdir(jobDir, { recursive: true });
+    const archiveFiles = [];
+    const manifestFiles = [];
+    for (const child of completed) {
+      const trackFolder = safeName(path.parse(child.original_name).name);
+      for (const stemFile of child.result_manifest?.files || []) {
+        const localPath = path.join(jobDir, trackFolder + '-' + stemFile.fileName);
+        await downloadObjectToFile(stemFile.objectKey, localPath);
+        const fileName = trackFolder + '/' + stemFile.fileName;
+        archiveFiles.push({ localPath, fileName });
+        manifestFiles.push({
+          track: child.original_name,
+          stem: stemFile.stem,
+          fileName,
+          objectKey: stemFile.objectKey,
+          sizeBytes: stemFile.sizeBytes,
+          contentType: stemFile.contentType
+        });
+      }
+    }
+    const resultKey = await buildArchive(parentId, archiveFiles);
+    await updateJob(parentId, {
+      status: 'completed',
+      progress: 100,
+      message: 'All ' + children.length + ' tracks are separated. Your ZIP pack is ready.',
+      result_key: resultKey,
+      result_manifest: { model: MODEL, outputFormat: parent.output_format, tracks: children.length, files: manifestFiles },
+      completed_at: new Date()
+    });
+  } catch (error) {
+    console.error('STEM ZIP job failed:', parentId, error.message);
+    await updateJob(parentId, {
+      status: 'failed',
+      progress: 100,
+      message: error.message || 'ZIP processing failed.',
+      error: error.stack || error.message
+    }).catch(dbError => console.error('Could not persist ZIP failure:', dbError.message));
+  } finally {
+    if (jobDir) await fs.promises.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+    activeJobs.delete(parentId);
+  }
 }
 
 async function submitFalJob(job) {
@@ -273,7 +387,7 @@ async function processFalJob(id) {
   try {
     const result = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [id]);
     const job = result.rows[0];
-    if (!job || ['completed', 'failed'].includes(job.status)) return;
+    if (!job || job.source_type === 'zip' || job.parent_job_id || ['completed', 'failed'].includes(job.status)) return;
     if (!job.fal_request_id) {
       await updateJob(id, { status: 'queued', progress: 8, message: 'Preparing a secure audio hand-off to FAL…' });
       await submitFalJob(job);
@@ -335,31 +449,59 @@ app.get('/api/capabilities', (_req, res) => res.json({
   note: 'Source separation is an estimate. Complex mixes may contain bleed between stems.'
 }));
 
+
 app.post('/api/jobs', uploadLimiter, upload.single('audio'), asyncRoute(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Choose an audio file first.' });
+  if (!req.file) return res.status(400).json({ error: 'Choose an audio file or ZIP package first.' });
   const id = randomUUID();
   const originalName = safeName(req.file.originalname);
   const ext = path.extname(originalName).toLowerCase() || '.audio';
   const inputKey = 'uploads/' + id + '/original' + ext;
   const outputFormat = req.body.outputFormat === 'mp3' ? 'mp3' : 'wav';
+  const isZip = ext === '.zip';
+  let extractedDir;
   try {
     await uploadFile(inputKey, req.file.path, req.file.mimetype || 'application/octet-stream');
-    await pool.query(
-      'INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,\'queued\',5,\'Upload stored securely. Preparing FAL Demucs…\',$3,$4,$5,$6,$7,\'audio\')',
-      [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream']
-    );
+    if (isZip) {
+      extractedDir = path.join(DATA_DIR, 'extract-' + id);
+      const tracks = await extractZipAudioFiles(req.file.path, extractedDir);
+      await pool.query(
+        "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',3,'ZIP uploaded. Preparing audio tracks…',$3,$4,$5,$6,$7,'zip')",
+        [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/zip']
+      );
+      for (const track of tracks) {
+        const childId = randomUUID();
+        const trackExt = path.extname(track.originalName).toLowerCase();
+        const childKey = 'uploads/' + id + '/tracks/' + childId + trackExt;
+        await uploadFile(childKey, track.localPath, 'application/octet-stream');
+        const stat = await fs.promises.stat(track.localPath);
+        await pool.query(
+          "INSERT INTO public.stem_jobs (id, parent_job_id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,$3,'queued',3,'Track extracted. Waiting for FAL Demucs…',$4,$5,$6,$7,$8,'audio')",
+          [childId, id, track.originalName, childKey, MODEL, outputFormat, stat.size, 'application/octet-stream']
+        );
+      }
+    } else {
+      await pool.query(
+        "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',5,'Upload stored securely. Preparing FAL Demucs…',$3,$4,$5,$6,$7,'audio')",
+        [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream']
+      );
+    }
   } finally {
     await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
+    if (extractedDir) await fs.promises.rm(extractedDir, { recursive: true, force: true }).catch(() => {});
   }
   res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id });
-  void processFalJob(id);
+  if (isZip) void processZipJob(id);
+  else void processFalJob(id);
 }));
 
 app.get('/api/jobs/:id', asyncRoute(async (req, res) => {
   const result = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
   const job = result.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
-  if (job.fal_request_id && ['queued', 'processing'].includes(job.status)) void processFalJob(job.id);
+  if (['queued', 'processing'].includes(job.status)) {
+    if (job.source_type === 'zip') void processZipJob(job.id);
+    else if (!job.parent_job_id) void processFalJob(job.id);
+  }
   const fresh = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [job.id]);
   res.json(publicJob(fresh.rows[0]));
 }));
@@ -428,18 +570,23 @@ async function start() {
     input_content_type TEXT,
     source_type TEXT NOT NULL DEFAULT 'audio'
   )`);
+  await pool.query('ALTER TABLE public.stem_jobs ADD COLUMN IF NOT EXISTS parent_job_id UUID REFERENCES public.stem_jobs(id) ON DELETE CASCADE');
+  await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_parent_job_idx ON public.stem_jobs (parent_job_id) WHERE parent_job_id IS NOT NULL');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_status_created_idx ON public.stem_jobs (status, created_at)');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_fal_request_idx ON public.stem_jobs (fal_request_id) WHERE fal_request_id IS NOT NULL');
   app.listen(PORT, '0.0.0.0', () => {
     console.log('STEM FAL API listening on ' + PORT);
     setInterval(async () => {
       const queued = await pool.query(
-        "SELECT id FROM public.stem_jobs WHERE status IN ('queued','processing') ORDER BY created_at ASC LIMIT 20"
+        "SELECT id, source_type FROM public.stem_jobs WHERE parent_job_id IS NULL AND status IN ('queued','processing') ORDER BY created_at ASC LIMIT 20"
       ).catch(error => {
         console.error('Could not recover queued STEM jobs:', error.message);
         return { rows: [] };
       });
-      for (const row of queued.rows) void processFalJob(row.id);
+      for (const row of queued.rows) {
+        if (row.source_type === 'zip') void processZipJob(row.id);
+        else void processFalJob(row.id);
+      }
     }, 5000).unref();
   });
 }
