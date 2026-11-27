@@ -62,6 +62,14 @@ def process_job(job_id, source_path, job_dir):
                 "mp3": f"/api/jobs/{job_id}/audio/{item['mp3']}",
                 "diagnostics": item.get("signal_diagnostics", {})
             })
+        for ref_track in manifest.get("provided_vocal_tracks", []):
+            results.append({
+                "name": "provided vocal · " + ref_track.get("source_file", "reference"),
+                "duration_seconds": ref_track.get("duration_seconds"),
+                "wav": f"/api/jobs/{job_id}/audio/{ref_track['wav']}",
+                "mp3": f"/api/jobs/{job_id}/audio/{ref_track['mp3']}",
+                "note": "Separately supplied vocal reference, conservatively enhanced; review alignment before mixing."
+            })
         vocal_enhancement = manifest.get("vocal_enhancement") or {}
         if vocal_enhancement.get("wav") and vocal_enhancement.get("mp3"):
             results.append({
@@ -146,6 +154,10 @@ def get_audio(job_id, filename):
         permitted.update([stem.get("wav"), stem.get("mp3")])
     mix = manifest.get("mix") or {}
     permitted.update([mix.get("wav"), mix.get("mp3")])
+    enhancement = manifest.get("vocal_enhancement") or {}
+    permitted.update([enhancement.get("wav"), enhancement.get("mp3")])
+    for ref_track in manifest.get("provided_vocal_tracks", []):
+        permitted.update([ref_track.get("wav"), ref_track.get("mp3")])
     if safe not in permitted: abort(404)
     path = job_dir / safe
     if not path.is_file(): abort(404)
