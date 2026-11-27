@@ -42,7 +42,7 @@ Never commit `.env`, credentials, signed URLs or API keys. The Neon bucket must 
 
 ## Processing lifecycle
 
-1. The browser uploads an audio file to `POST /api/jobs`.
+1. The browser uploads one audio file or a ZIP package to `POST /api/jobs`. ZIP files are safely inspected and extracted to audio tracks (maximum 20 tracks and 1 GB total uncompressed audio by default).
 2. The API stores the original in the private Neon bucket and inserts a `stem_jobs` record.
 3. The API creates a short-lived signed read URL for the private original and submits it to FAL's queue API.
 4. The API persists FAL's request, status and response URLs.
@@ -50,7 +50,7 @@ Never commit `.env`, credentials, signed URLs or API keys. The Neon bucket must 
 6. On completion, the API downloads the six FAL output files, copies them to private Neon storage, creates a ZIP archive and saves a result manifest.
 7. The browser fetches fresh one-hour signed preview/download links from `GET /api/jobs/:id/results`; the complete ZIP is available at `GET /api/jobs/:id/download`.
 
-The FAL request uses the six `htdemucs_6s` stems: vocals, drums, bass, other, guitar and piano. Each request produces the selected output format (WAV or MP3); the API does not claim to generate both formats from a single inference.
+Each ZIP track is submitted as its own FAL request. STEM combines all resulting stems into one downloadable ZIP while keeping track folders separate. The FAL request uses the six `htdemucs_6s` stems: vocals, drums, bass, other, guitar and piano. Each request produces the selected output format (WAV or MP3); the API does not claim to generate both formats from a single inference.
 
 ## API
 
