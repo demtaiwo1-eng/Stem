@@ -15,15 +15,15 @@
  */
 
 const { spawn } = require('node:child_process');
-const { promisify } = require('node:util');
-const { writeFile, mkdtemp, rm, readFile } = require('node:fs/promises');
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const { once } = require('node:events');
 const archiver = require('archiver');
 const unzipper = require('unzipper');
 
-const run = promisify(spawn);
+const require = createRequire(import.meta.url);
 const API_BASE = (process.env.STEM_API_BASE || '').replace(/\/+$/, '');
 const FRONTEND_REPO = process.env.STEM_FRONTEND_REPO || 'demtaiwo1-eng/stem.github.io';
 const FRONTEND_BRANCH = process.env.STEM_FRONTEND_BRANCH || 'main';
