@@ -6,8 +6,10 @@ const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
+const { PassThrough } = require('node:stream');
 const { Pool } = require('pg');
 const archiver = require('archiver');
+const { Upload } = require('@aws-sdk/lib-storage');
 const {
   S3Client,
   PutObjectCommand,
@@ -99,13 +101,20 @@ async function updateJob(id, fields) {
   await pool.query('UPDATE public.stem_jobs SET ' + sets.join(', ') + ' WHERE id = $1', values);
 }
 
-async function uploadBuffer(key, body, contentType) {
-  await s3.send(new PutObjectCommand({
-    Bucket: BUCKET,
-    Key: key,
-    Body: body,
-    ContentType: contentType || 'application/octet-stream'
-  }));
+async function uploadFile(key, filePath, contentType) {
+  const uploader = new Upload({
+    client: s3,
+    params: {
+      Bucket: BUCKET,
+      Key: key,
+      Body: fs.createReadStream(filePath),
+      ContentType: contentType || 'application/octet-stream'
+    },
+    queueSize: 4,
+    partSize: 8 * 1024 * 1024,
+    leavePartsOnError: false
+  });
+  await uploader.done();
 }
 
 async function getObjectStream(key) {
@@ -153,29 +162,40 @@ async function submitFalJob(job) {
   });
 }
 
-async function downloadRemoteFile(url) {
+async function downloadRemoteFile(url, destination) {
   const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
-  if (!response.ok) throw new Error('Could not retrieve a finished audio stem (' + response.status + ').');
+  if (!response.ok || !response.body) {
+    throw new Error('Could not retrieve a finished audio stem (' + response.status + ').');
+  }
+  await pipeline(response.body, fs.createWriteStream(destination));
   return {
-    buffer: Buffer.from(await response.arrayBuffer()),
-    contentType: response.headers.get('content-type') || 'audio/mpeg'
+    contentType: response.headers.get('content-type') || 'audio/mpeg',
+    sizeBytes: Number(response.headers.get('content-length') || 0)
   };
 }
 
-async function buildArchive(jobId, files, jobDir) {
-  const archivePath = path.join(jobDir, 'stem-results.zip');
-  await new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(archivePath);
-    const archive = archiver('zip', { zlib: { level: 5 } });
-    output.on('close', resolve);
-    archive.on('error', reject);
-    archive.pipe(output);
-    for (const file of files) archive.file(file.localPath, { name: file.fileName });
-    archive.finalize();
-  });
-  const zipBuffer = await fs.promises.readFile(archivePath);
+async function buildArchive(jobId, files) {
   const resultKey = 'results/' + jobId + '/stem-results.zip';
-  await uploadBuffer(resultKey, zipBuffer, 'application/zip');
+  const archive = archiver('zip', { zlib: { level: 5 } });
+  const stream = new PassThrough();
+  const uploader = new Upload({
+    client: s3,
+    params: {
+      Bucket: BUCKET,
+      Key: resultKey,
+      Body: stream,
+      ContentType: 'application/zip'
+    },
+    queueSize: 4,
+    partSize: 8 * 1024 * 1024,
+    leavePartsOnError: false
+  });
+  archive.on('error', error => stream.destroy(error));
+  archive.pipe(stream);
+  for (const file of files) archive.file(file.localPath, { name: file.fileName });
+  const uploadPromise = uploader.done();
+  await archive.finalize();
+  await uploadPromise;
   return resultKey;
 }
 
@@ -191,24 +211,24 @@ async function finishFalJob(job) {
     for (const stem of stems) {
       const item = payload[stem];
       if (!item?.url) continue;
-      const remote = await downloadRemoteFile(item.url);
       const ext = (job.output_format || 'wav') === 'wav' ? 'wav' : 'mp3';
       const fileName = stem + '.' + ext;
       const objectKey = 'results/' + job.id + '/' + fileName;
-      await uploadBuffer(objectKey, remote.buffer, remote.contentType);
       const localPath = path.join(jobDir, fileName);
-      await fs.promises.writeFile(localPath, remote.buffer);
+      const remote = await downloadRemoteFile(item.url, localPath);
+      await uploadFile(objectKey, localPath, remote.contentType);
+      const stat = await fs.promises.stat(localPath);
       files.push({
         stem,
         fileName,
         objectKey,
-        sizeBytes: remote.buffer.length,
+        sizeBytes: stat.size,
         contentType: remote.contentType,
         localPath
       });
     }
     if (files.length < 4) throw new Error('FAL returned fewer than four expected stems; the result was not published.');
-    const resultKey = await buildArchive(job.id, files, jobDir);
+    const resultKey = await buildArchive(job.id, files);
     const manifestFiles = await Promise.all(files.map(async file => ({
       stem: file.stem,
       fileName: file.fileName,
@@ -309,8 +329,7 @@ app.post('/api/jobs', upload.single('audio'), asyncRoute(async (req, res) => {
   const inputKey = 'uploads/' + id + '/original' + ext;
   const outputFormat = req.body.outputFormat === 'mp3' ? 'mp3' : 'wav';
   try {
-    const body = await fs.promises.readFile(req.file.path);
-    await uploadBuffer(inputKey, body, req.file.mimetype || 'application/octet-stream');
+    await uploadFile(inputKey, req.file.path, req.file.mimetype || 'application/octet-stream');
     await pool.query(
       'INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,\'queued\',5,\'Upload stored securely. Preparing FAL Demucs…\',$3,$4,$5,$6,$7,\'audio\')',
       [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream']
