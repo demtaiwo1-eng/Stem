@@ -57,7 +57,57 @@ def run_model(model):
         track_dir = candidates[0]
     return track_dir
 
+def prepare_source():
+    global source
+    if source.suffix.lower() != ".zip":
+        return []
+    import zipfile
+    extract_dir = job_dir / "uploaded-package"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    max_files, max_uncompressed = 100, 2 * 1024 * 1024 * 1024
+    audio_exts = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}
+    candidates, total = [], 0
+    with zipfile.ZipFile(source) as package:
+        entries = [x for x in package.infolist() if not x.is_dir()]
+        if len(entries) > max_files:
+            raise RuntimeError("ZIP contains too many files (maximum 100).")
+        for entry in entries:
+            name = entry.filename.replace("\\", "/")
+            parts = Path(name).parts
+            if name.startswith("/") or ".." in parts or (parts and ":" in parts[0]):
+                raise RuntimeError("ZIP contains an unsafe file path.")
+            mode = (entry.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise RuntimeError("ZIP symbolic links are not accepted.")
+            total += entry.file_size
+            if total > max_uncompressed:
+                raise RuntimeError("ZIP expands beyond the 2 GB processing limit.")
+            if Path(name).suffix.lower() not in audio_exts:
+                continue
+            target = extract_dir / Path(name).name
+            if target.exists():
+                target = extract_dir / (str(len(candidates)) + "_" + target.name)
+            with package.open(entry) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            candidates.append(target)
+    if not candidates:
+        raise RuntimeError("ZIP must contain at least one supported audio file (MP3, WAV, FLAC, M4A, AAC, OGG or OPUS).")
+    mix_terms = ("mix", "master", "full", "original", "source", "song", "track")
+    vocal_terms = ("vocal", "voice", "acapella", "a-cappella", "karaoke")
+    def score(item):
+        name = item.stem.lower()
+        return (100 if any(term in name for term in mix_terms) else 0) - (200 if any(term in name for term in vocal_terms) else 0) + item.stat().st_size / 1e9
+    source = max(candidates, key=score)
+    print("ZIP package accepted:", len(candidates), "audio files; primary mix:", source.name, flush=True)
+    # Preserve all supplied audio assets in the result package for review and alignment.
+    assets_dir = out_dir / "provided-audio-assets"
+    assets_dir.mkdir(exist_ok=True)
+    for item in candidates:
+        shutil.copy2(item, assets_dir / item.name)
+    return candidates
+
 def main():
+    supplied_assets = prepare_source()
     duration = duration_of(source)
     print("Source duration: %.6f seconds" % duration, flush=True)
     primary_dir = run_model(primary_model)
@@ -141,6 +191,24 @@ def main():
         print("Exported", stem, "|", metrics, flush=True)
     if not manifest["stems"]:
         raise RuntimeError("No expected stems were produced by the selected models.")
+
+    # Optional conservative vocal polish. Keep the untouched recovered vocal as well.
+    vocal_wav = out_dir / "vocals.wav"
+    if vocal_wav.exists():
+        enhanced_wav = out_dir / "vocals-enhanced.wav"
+        enhanced_mp3 = out_dir / "vocals-enhanced.mp3"
+        enhancement_filter = "highpass=f=75,lowpass=f=16500,acompressor=threshold=0.12:ratio=2.2:attack=15:release=180:makeup=1.2,alimiter=limit=0.95"
+        run(["ffmpeg", "-y", "-i", str(vocal_wav), "-af", enhancement_filter, "-t", f"{duration:.6f}", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", str(enhanced_wav)])
+        run(["ffmpeg", "-y", "-i", str(enhanced_wav), "-c:a", "libmp3lame", "-b:a", "320k", str(enhanced_mp3)])
+        manifest["vocal_enhancement"] = {
+            "wav": enhanced_wav.name, "mp3": enhanced_mp3.name,
+            "duration_seconds": round(duration, 6),
+            "processing": ["high-pass filtering", "high-frequency roll-off", "moderate compression", "peak limiting"],
+            "note": "Conservative alternate processing, not source recovery, mastering, or a guarantee of professional vocal quality."
+        }
+        print("Created conservative enhanced-vocal alternate.", flush=True)
+    else:
+        manifest["vocal_enhancement"] = {"available": False, "note": "No vocal stem was available to enhance."}
 
     # Create an editable stem-sum preview, not a claim of a mastered or exact original mix.
     available = [out_dir / (name + ".wav") for name in stems if (out_dir / (name + ".wav")).exists()]
