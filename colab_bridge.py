@@ -12,7 +12,7 @@ DEVICE = os.environ.get("STEM_DEVICE", "cpu")
 MODEL = os.environ.get("STEM_MODEL", "htdemucs_6s")
 jobs = {}
 lock = threading.Lock()
-allowed = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}
+allowed = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".zip"}
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 250 * 1024 * 1024
 CORS(app, resources={r"/*": {"origins": "*", "allow_headers": ["Content-Type", "X-STEM-Token", "cf-skip-browser-warning"], "methods": ["GET", "POST", "OPTIONS"]}})
@@ -62,6 +62,15 @@ def process_job(job_id, source_path, job_dir):
                 "mp3": f"/api/jobs/{job_id}/audio/{item['mp3']}",
                 "diagnostics": item.get("signal_diagnostics", {})
             })
+        vocal_enhancement = manifest.get("vocal_enhancement") or {}
+        if vocal_enhancement.get("wav") and vocal_enhancement.get("mp3"):
+            results.append({
+                "name": "enhanced vocals",
+                "duration_seconds": vocal_enhancement.get("duration_seconds"),
+                "wav": f"/api/jobs/{job_id}/audio/{vocal_enhancement['wav']}",
+                "mp3": f"/api/jobs/{job_id}/audio/{vocal_enhancement['mp3']}",
+                "note": vocal_enhancement.get("note", "Conservatively processed vocal alternate")
+            })
         mix = manifest.get("mix")
         if mix:
             results.append({
@@ -89,7 +98,7 @@ def create_job():
     filename = secure_filename(uploaded.filename or "audio.mp3")
     ext = Path(filename).suffix.lower()
     if ext not in allowed:
-        return jsonify({"error": "Unsupported audio type. Use MP3, WAV, FLAC, M4A, AAC, OGG or OPUS."}), 400
+        return jsonify({"error": "Unsupported upload. Use an audio file or a ZIP containing supported audio tracks."}), 400
     job_id = uuid.uuid4().hex
     job_dir = ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
