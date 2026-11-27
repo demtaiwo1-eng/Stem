@@ -41,8 +41,8 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (![".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"].includes(ext)) {
-      return cb(new Error("Unsupported audio format. Use MP3, WAV, FLAC, M4A, AAC, OGG or OPUS."));
+    if (![".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".zip"].includes(ext)) {
+      return cb(new Error("Unsupported upload. Use an audio file or a ZIP containing audio tracks."));
     }
     cb(null, true);
   }
