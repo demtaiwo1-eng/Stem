@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const rateLimit = require('express-rate-limit');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -12,7 +13,6 @@ const archiver = require('archiver');
 const { Upload } = require('@aws-sdk/lib-storage');
 const {
   S3Client,
-  PutObjectCommand,
   GetObjectCommand
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -45,6 +45,19 @@ const s3 = new S3Client({
   } : undefined
 });
 const activeJobs = new Set();
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false
+});
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Upload limit reached. Please wait before starting another separation.' }
+});
 
 fs.mkdirSync(TMP_DIR, { recursive: true });
 app.use(cors({
@@ -56,6 +69,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json({ limit: '1mb' }));
+app.use('/api', apiLimiter);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const upload = multer({
@@ -321,7 +335,7 @@ app.get('/api/capabilities', (_req, res) => res.json({
   note: 'Source separation is an estimate. Complex mixes may contain bleed between stems.'
 }));
 
-app.post('/api/jobs', upload.single('audio'), asyncRoute(async (req, res) => {
+app.post('/api/jobs', uploadLimiter, upload.single('audio'), asyncRoute(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Choose an audio file first.' });
   const id = randomUUID();
   const originalName = safeName(req.file.originalname);
