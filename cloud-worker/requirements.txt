@@ -1,0 +1,4 @@
+gradio==5.32.0
+spaces
+demucs==4.0.1
+imageio-ffmpeg==0.6.0
