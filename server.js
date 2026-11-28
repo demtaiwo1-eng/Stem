@@ -319,6 +319,7 @@ async function start() {
     source_type TEXT NOT NULL DEFAULT 'audio'
   )`);
   await pool.query('ALTER TABLE public.stem_jobs ADD COLUMN IF NOT EXISTS parent_job_id UUID REFERENCES public.stem_jobs(id) ON DELETE CASCADE');
+  await pool.query("ALTER TABLE public.stem_jobs ADD COLUMN IF NOT EXISTS processor TEXT NOT NULL DEFAULT 'legacy'");
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_parent_job_idx ON public.stem_jobs (parent_job_id) WHERE parent_job_id IS NOT NULL');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_status_created_idx ON public.stem_jobs (status, created_at)');
   app.listen(PORT, '0.0.0.0', () => { console.log('STEM free Demucs API listening on ' + PORT); });
