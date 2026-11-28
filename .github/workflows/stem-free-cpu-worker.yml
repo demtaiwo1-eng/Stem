@@ -1,0 +1,76 @@
+name: STEM Free CPU Audio Worker
+
+on:
+  repository_dispatch:
+    types: [stem-job-queued]
+  workflow_dispatch:
+  schedule:
+    # Fallback queue sweep in case a dispatch is missed.
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stem-free-cpu-worker
+  cancel-in-progress: false
+
+jobs:
+  separate-audio:
+    name: Process queued STEM audio
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Check out STEM worker
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: cloud-worker/requirements.txt
+
+      - name: Cache Demucs model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch
+          key: stem-demucs-htdemucs-6s-v1
+          restore-keys: |
+            stem-demucs-
+
+      - name: Install audio system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libsndfile1
+
+      - name: Install Demucs worker
+        working-directory: cloud-worker
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Validate worker credentials
+        env:
+          STEM_WORKER_TOKEN: ${{ secrets.STEM_WORKER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$STEM_WORKER_TOKEN" ] || [ "${#STEM_WORKER_TOKEN}" -lt 32 ]; then
+            echo "::error::Add a repository Actions secret named STEM_WORKER_TOKEN (at least 32 characters)."
+            exit 1
+          fi
+
+      - name: Claim and process queued jobs
+        working-directory: cloud-worker
+        env:
+          STEM_API_BASE: https://stem-api-o0ij.onrender.com
+          STEM_WORKER_TOKEN: ${{ secrets.STEM_WORKER_TOKEN }}
+          STEM_MODEL: htdemucs_6s
+          STEM_CPU_THREADS: "2"
+          STEM_ONESHOT: "1"
+          STEM_MAX_JOBS_PER_RUN: "3"
+          STEM_TRACK_TIMEOUT_SECONDS: "14400"
+          OMP_NUM_THREADS: "2"
+          MKL_NUM_THREADS: "2"
+          OPENBLAS_NUM_THREADS: "1"
+        run: python app.py
