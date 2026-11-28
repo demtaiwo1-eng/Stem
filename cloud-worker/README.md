@@ -6,18 +6,17 @@ STEM now uses an on-demand GitHub-hosted CPU runner for open-source Demucs separ
 
 1. The STEM website uploads audio to the existing Render API.
 2. Render stores the original upload and queued job in the existing Neon-backed private storage.
-3. Render sends a GitHub `repository_dispatch` event when the optional `GITHUB_ACTIONS_TOKEN` is configured.
-4. The GitHub Actions workflow starts a temporary Ubuntu CPU runner, downloads the audio through a short-lived signed URL, and runs Demucs.
-5. The worker uploads the result archive through the authenticated Render worker API.
-6. Render stores the stems in the existing private bucket; the customer previews and downloads them from STEM.
+3. Every five minutes, the GitHub Actions workflow starts a temporary Ubuntu CPU runner, checks for queued jobs, downloads audio through a short-lived signed URL, and runs Demucs.
+4. The worker uploads the result archive through the authenticated Render worker API.
+5. Render stores the stems in the existing private bucket; the customer previews and downloads them from STEM.
 
 Existing Render, Neon database, object storage, job history, and customer UI are retained. The worker does not receive Neon credentials.
 
 ## Free-runner behavior and limits
 
 - The workflow uses GitHub-hosted `ubuntu-latest` CPU runners and processes up to three queued jobs per run.
-- It is triggered immediately by Render when the optional dispatch token is configured, and also performs a scheduled queue sweep every 30 minutes as a fallback.
-- GitHub Actions has usage quotas and concurrency limits. Free minutes depend on whether the repository is public or private and the account's remaining monthly allowance. Check GitHub Actions billing/usage before accepting high-volume traffic.
+- The repository is public. GitHub documents standard `ubuntu-latest` runners in public repositories as free and unlimited; GitHub still applies platform concurrency and workflow limits. See [GitHub Actions billing and usage](https://docs.github.com/en/actions/concepts/billing-and-usage).
+- The queue is checked every five minutes. Scheduled starts can occasionally be delayed by GitHub, so this is not a guaranteed real-time service.
 - Jobs can wait in the queue if GitHub runner minutes are exhausted, Actions are disabled, or a workflow is already running.
 - This is a free-tier prototype/low-volume processing design, not an unlimited production compute service. Demucs CPU processing can be slow, especially for long audio and ZIP batches.
 - Workflow timeout is 350 minutes. Each individual track has a 4-hour processing timeout.
@@ -39,14 +38,6 @@ Copy the generated value directly into both secret settings below. Never paste i
 Open the Render service `stem-api` → Environment and set:
 
 - `STEM_WORKER_TOKEN`: the generated random token.
-
-Optional immediate dispatch (recommended):
-
-- Create a GitHub fine-grained personal access token restricted to repository `demtaiwo1-eng/Stem`, with **Contents: Read and write** permission.
-- Add it to Render as `GITHUB_ACTIONS_TOKEN`.
-- The token is used only by the Render API to send the `stem-job-queued` repository dispatch event. The scheduled workflow remains as a fallback.
-
-Do not replace existing Render or Neon credentials.
 
 ### GitHub Actions secret
 
