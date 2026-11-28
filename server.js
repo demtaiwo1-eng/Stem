@@ -94,40 +94,6 @@ const resultUpload = multer({ dest: TMP_DIR, limits: { fileSize: Number(process.
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const safeName = name => path.basename(name).replace(/[^a-z0-9._-]/gi, '_').slice(0, 150) || 'audio';
 const WORKER_TOKEN = process.env.STEM_WORKER_TOKEN || '';
-const GITHUB_ACTIONS_TOKEN = process.env.GITHUB_ACTIONS_TOKEN || '';
-
-async function dispatchGitHubWorker(jobId) {
-  if (!GITHUB_ACTIONS_TOKEN) {
-    console.warn('GITHUB_ACTIONS_TOKEN is not configured; the scheduled GitHub Actions worker will pick up queued jobs.');
-    return;
-  }
-  try {
-    const response = await fetch('https://api.github.com/repos/demtaiwo1-eng/Stem/dispatches', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GITHUB_ACTIONS_TOKEN}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ event_type: 'stem-job-queued', client_payload: { job_id: jobId } }),
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!response.ok) throw new Error(`GitHub dispatch returned HTTP ${response.status}`);
-    console.info(`GitHub Actions worker dispatched for STEM job ${jobId}.`);
-  } catch (error) {
-    console.error(`Could not dispatch GitHub Actions worker for STEM job ${jobId}:`, error.message);
-  }
-}
-function requireWorker(req, res, next) {
-  if (!WORKER_TOKEN) return res.status(503).json({ error: 'The remote processor is not configured yet.' });
-  const header = req.get('authorization') || '';
-  const supplied = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const a = Buffer.from(supplied);
-  const b = Buffer.from(WORKER_TOKEN);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: 'Worker authorization failed.' });
-  next();
-}
 const publicJob = job => ({
   id: job.id,
   name: job.original_name,
@@ -240,7 +206,6 @@ app.post('/api/jobs', uploadLimiter, upload.single('audio'), asyncRoute(async (r
       [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream', ext === '.zip' ? 'zip' : 'audio']
     );
   } finally { await fs.promises.rm(req.file.path, { force: true }).catch(() => {}); }
-  void dispatchGitHubWorker(id);
   res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id, processor: 'cloud-demucs' });
 }));
 
