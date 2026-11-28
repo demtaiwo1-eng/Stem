@@ -33,7 +33,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/torch
-          key: stem-demucs-htdemucs-6s-v1
+          key: stem-demucs-htdemucs-6s-cpu-v2
           restore-keys: |
             stem-demucs-
 
@@ -47,6 +47,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+
+      - name: Preflight PyTorch audio output
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          import torch
+          import torchaudio
+
+          assert torch.version.__version__ if hasattr(torch.version, "__version__") else True
+          with tempfile.TemporaryDirectory() as folder:
+              target = Path(folder) / "audio-preflight.wav"
+              torchaudio.save(str(target), torch.zeros(2, 4410), 44100)
+              assert target.exists() and target.stat().st_size > 44
+          print(f"Audio output preflight passed: torch={torch.__version__}, torchaudio={torchaudio.__version__}")
+          PY
 
       - name: Validate worker credentials
         env:
