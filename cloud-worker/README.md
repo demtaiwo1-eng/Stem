@@ -17,10 +17,9 @@ Existing Render, Neon database, object storage, job history, and customer UI are
 - The workflow uses GitHub-hosted `ubuntu-latest` CPU runners and processes up to three queued jobs per run.
 - The repository is public. GitHub documents standard `ubuntu-latest` runners in public repositories as free and unlimited; GitHub still applies platform concurrency and workflow limits. See [GitHub Actions billing and usage](https://docs.github.com/en/actions/concepts/billing-and-usage).
 - The queue is checked every five minutes. Scheduled starts can occasionally be delayed by GitHub, so this is not a guaranteed real-time service.
-- Jobs can wait in the queue if GitHub runner minutes are exhausted, Actions are disabled, or a workflow is already running.
+- Jobs can wait in the queue if Actions are disabled, GitHub delays a scheduled run, or a workflow is already running.
 - This is a free-tier prototype/low-volume processing design, not an unlimited production compute service. Demucs CPU processing can be slow, especially for long audio and ZIP batches.
 - Workflow timeout is 350 minutes. Each individual track has a 4-hour processing timeout.
-- The scheduled fallback runs twice an hour. If the dispatch token is omitted, a newly uploaded job may wait up to approximately 30 minutes for the next scheduled run.
 - No Google Cloud resources are created and no Google Cloud billing is enabled by this workflow.
 
 ## One-time secrets
