@@ -27,6 +27,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(os.tmpdir(), 'stem-jobs');
 const TMP_DIR = path.join(DATA_DIR, 'uploads');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 250);
 const MODEL = process.env.STEM_MODEL || 'htdemucs_6s';
+const PROCESSOR_MODE = process.env.STEM_PROCESSOR || 'local-first-demucs';
 const BUCKET = process.env.STEM_BUCKET || 'stem-audio-private';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || 'https://demtaiwo1-eng.github.io')
   .split(',').map(value => value.trim()).filter(Boolean);
@@ -163,11 +164,11 @@ app.get('/health', asyncRoute(async (_req, res) => {
   const storageProbeKey = 'health-checks/' + randomUUID() + '.txt';
   await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: storageProbeKey, Body: 'STEM storage connection check', ContentType: 'text/plain' }));
   await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: storageProbeKey }));
-  res.json({ ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY), service: 'STEM Audio Workbench', version: '4.0.0', database: 'connected', objectStorage: true, processing: 'local-demucs-with-optional-free-cloud-worker', bucket: BUCKET });
+  res.json({ ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY), service: 'STEM Audio Workbench', version: '4.0.0', database: 'connected', objectStorage: true, processing: PROCESSOR_MODE, bucket: BUCKET });
 }));
 
 app.get('/api/capabilities', (_req, res) => res.json({
-  engine: 'Open-source Demucs', model: MODEL, providers: ['local-device', 'optional-free-cloud-worker'],
+  engine: 'Open-source Demucs', model: MODEL, providers: ['local-device', 'optional-free-cloud-worker'], processorMode: PROCESSOR_MODE,
   sources: ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'], formats: ['wav', 'mp3'],
   maxUploadMB: MAX_UPLOAD_MB, zipUploads: true, maxZipTracks: MAX_ZIP_TRACKS,
   maxZipUnpackedMB: MAX_ZIP_UNPACKED_MB, persistentJobs: true, objectStorage: 'Neon Object Storage',
