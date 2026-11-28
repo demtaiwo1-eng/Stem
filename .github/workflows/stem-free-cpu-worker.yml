@@ -1,6 +1,11 @@
 name: STEM Free CPU Audio Worker
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "cloud-worker/**"
+      - ".github/workflows/stem-free-cpu-worker.yml"
   workflow_dispatch:
   schedule:
     # Poll the queue every five minutes; public-repository standard runners are free.
@@ -56,7 +61,6 @@ jobs:
           import torch
           import torchaudio
 
-          assert torch.version.__version__ if hasattr(torch.version, "__version__") else True
           with tempfile.TemporaryDirectory() as folder:
               target = Path(folder) / "audio-preflight.wav"
               torchaudio.save(str(target), torch.zeros(2, 4410), 44100)
