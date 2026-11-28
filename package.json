@@ -1,8 +1,8 @@
 {
   "name": "stem-audio-workbench",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "FAL Demucs audio stem separation API backed by Neon Postgres and private object storage",
+  "description": "Open-source Demucs audio stem separation API backed by Neon Postgres and private object storage",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
