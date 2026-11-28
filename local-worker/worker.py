@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 import imageio_ffmpeg
 
 APP_ORIGINS = [x.strip() for x in os.getenv("STEM_ALLOWED_ORIGINS", "https://demtaiwo1-eng.github.io").split(",") if x.strip()]
@@ -33,6 +33,14 @@ async def private_network_access(request, call_next):
     response = await call_next(request)
     response.headers["Access-Control-Allow-Private-Network"] = "true"
     return response
+
+async def stream_archive(archive_path: Path, root: Path):
+    try:
+        with archive_path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                yield chunk
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 def run_demucs(input_file: Path, output_dir: Path, output_format: str, track_label: str):
     command = [
@@ -92,8 +100,9 @@ async def separate(audio: UploadFile = File(...), outputFormat: str = Form("wav"
     suffix = Path(audio.filename or "audio.wav").suffix.lower()
     if suffix not in AUDIO_EXTS and suffix != ".zip":
         raise HTTPException(400, "Choose a supported audio file or ZIP package.")
-    with tempfile.TemporaryDirectory(prefix="stem-local-") as temp:
-        root = Path(temp)
+    temp = tempfile.mkdtemp(prefix="stem-local-")
+    root = Path(temp)
+    try:
         input_path = root / ("upload" + suffix)
         total = 0
         with input_path.open("wb") as destination:
@@ -139,7 +148,10 @@ async def separate(audio: UploadFile = File(...), outputFormat: str = Form("wav"
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=5) as archive:
             for item in files:
                 archive.write(item, item.name)
-        return FileResponse(archive_path, media_type="application/zip", filename="STEM-results.zip")
+        return StreamingResponse(stream_archive(archive_path, root), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="STEM-results.zip"'})
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
 
 if __name__ == "__main__":
     import uvicorn
