@@ -352,14 +352,36 @@ app.get('/api/jobs/:id/results', asyncRoute(async (req, res) => {
   const job = result.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
   if (job.status !== 'completed' || !job.result_manifest) return res.status(409).json({ error: 'Results are not ready.' });
-  const files = await Promise.all((job.result_manifest.files || []).map(async file => ({
+  const files = (job.result_manifest.files || []).map((file, index) => ({
     ...file,
-    downloadUrl: await getSignedUrl(s3, new GetObjectCommand({
-      Bucket: BUCKET,
-      Key: file.objectKey
-    }), { expiresIn: 60 * 60 })
-  })));
+    streamUrl: '/api/jobs/' + req.params.id + '/stems/' + index
+  }));
   res.json({ ...job.result_manifest, files });
+}));
+
+app.get('/api/jobs/:id/stems/:index', asyncRoute(async (req, res) => {
+  const result = await pool.query('SELECT status, result_manifest FROM public.stem_jobs WHERE id = $1', [req.params.id]);
+  const job = result.rows[0];
+  if (!job || job.status !== 'completed' || !job.result_manifest) return res.status(404).json({ error: 'Stem is not ready.' });
+  const index = Number(req.params.index);
+  const files = job.result_manifest.files || [];
+  if (!Number.isInteger(index) || index < 0 || index >= files.length) return res.status(404).json({ error: 'Stem not found.' });
+  const file = files[index];
+  const key = String(file.objectKey || '');
+  if (!key.startsWith('results/' + req.params.id + '/')) return res.status(404).json({ error: 'Stem not found.' });
+  const range = String(req.get('range') || '');
+  if (range && !/^bytes=\\d*-\\d*$/.test(range)) return res.status(416).end();
+  const command = new GetObjectCommand({ Bucket: BUCKET, Key: key, ...(range ? { Range: range } : {}) });
+  const object = await s3.send(command);
+  const fileName = safeName(path.basename(file.fileName || 'stem.wav'));
+  res.status(range ? 206 : 200);
+  res.setHeader('Content-Type', file.contentType || 'audio/wav');
+  res.setHeader('Content-Disposition', (req.query.download === '1' ? 'attachment' : 'inline') + '; filename="' + fileName + '"');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'private, no-store');
+  if (object.ContentLength != null) res.setHeader('Content-Length', String(object.ContentLength));
+  if (object.ContentRange) res.setHeader('Content-Range', object.ContentRange);
+  await pipeline(object.Body, res);
 }));
 
 app.get('/api/jobs/:id/download', asyncRoute(async (req, res) => {
