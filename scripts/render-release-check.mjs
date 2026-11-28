@@ -29,7 +29,7 @@ async function main() {
     }
   }
   if (!health) throw lastError || new Error('Render API did not become reachable.');
-  console.log('[STEM] Render API is reachable; database=' + health.database + ', objectStorage=' + health.objectStorage + ', falConfigured=' + health.falConfigured + '.');
+  console.log('[STEM] Render API is reachable; database=' + health.database + ', objectStorage=' + health.objectStorage + ', processing=' + health.processing + ', workerConfigured=' + health.workerConfigured + '.');
 
   const configUrl = new URL('api-config.js', frontendUrl).toString();
   const configResponse = await fetch(configUrl, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
@@ -49,14 +49,17 @@ async function main() {
   }
   if (capabilities.zipUploads !== true) throw new Error('ZIP upload support is not enabled.');
 
-  if (health.ok !== true || health.database !== 'connected' || health.objectStorage !== true || health.falConfigured !== true) {
+  if (health.ok !== true || health.database !== 'connected' || health.objectStorage !== true ||
+      health.processing !== 'github-actions-cpu' || health.workerConfigured !== true) {
     const missing = [];
+    if (health.ok !== true) missing.push('healthy API');
     if (health.database !== 'connected') missing.push('Neon database');
     if (health.objectStorage !== true) missing.push('Neon private object storage');
-    if (health.falConfigured !== true) missing.push('FAL_API_KEY');
-    throw new Error('Service is reachable and frontend is connected, but processing setup is incomplete: ' + missing.join(', ') + '.');
+    if (health.processing !== 'github-actions-cpu') missing.push('GitHub Actions CPU processing mode');
+    if (health.workerConfigured !== true) missing.push('GitHub Actions worker token configuration');
+    throw new Error('Service is reachable and frontend is connected, but free processing setup is incomplete: ' + missing.join(', ') + '.');
   }
-  console.log('[STEM] PASS: Render health, Neon, FAL configuration, six-stem capabilities, WAV/MP3, ZIP and Pages API URL.');
+  console.log('[STEM] PASS: Render health, Neon, free GitHub Actions CPU worker, six-stem capabilities, WAV/MP3, ZIP and Pages API URL.');
 }
 
 main().catch(error => {
