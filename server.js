@@ -213,7 +213,7 @@ app.get('/api/jobs/:id', asyncRoute(async (req, res) => {
   res.json(publicJob(job));
 }));
 
-app.post('/api/jobs/:id/local-result', uploadLimiter, resultUpload.single('archive'), asyncRoute(async (req, res) => {
+app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRoute(async (req, res) => {
   const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
   const job = jobResult.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
@@ -238,7 +238,13 @@ app.post('/api/jobs/:id/local-result', uploadLimiter, resultUpload.single('archi
       const contentType = path.extname(relativeName).toLowerCase() === '.mp3' ? 'audio/mpeg' : 'audio/wav';
       await uploadFile(objectKey, localPath, contentType);
       const stat = await fs.promises.stat(localPath);
-      manifestFiles.push({ track: safeParts.length > 1 ? safeParts.slice(0, -1).join('/') : null, stem: path.parse(relativeName).name, fileName: relativeName, objectKey, sizeBytes: stat.size, contentType });
+      const stemBase = path.parse(relativeName).name;
+      const stemMatch = stemBase.match(/_(vocals|drums|bass|guitar|piano|other)$/i);
+      manifestFiles.push({
+        track: safeParts.length > 1 ? safeParts.slice(0, -1).join('/') : (stemMatch ? stemBase.slice(0, -stemMatch[0].length) : null),
+        stem: stemMatch ? stemMatch[1].toLowerCase() : stemBase,
+        fileName: relativeName, objectKey, sizeBytes: stat.size, contentType
+      });
     }
     const files = await Promise.all(manifestFiles.map(async file => ({
       ...file, downloadUrl: await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: file.objectKey }), { expiresIn: 60 * 60 })
