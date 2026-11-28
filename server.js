@@ -108,8 +108,7 @@ const publicJob = job => ({
 async function updateJob(id, fields) {
   const allowed = [
     'status', 'progress', 'message', 'result_key', 'result_manifest',
-    'error', 'attempt_count', 'completed_at', 'fal_request_id',
-    'fal_status_url', 'fal_response_url'
+    'error', 'attempt_count', 'completed_at'
   ];
   const entries = Object.entries(fields).filter(([key]) => allowed.includes(key));
   if (!entries.length) return;
