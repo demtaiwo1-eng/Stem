@@ -26,7 +26,13 @@ Set these variables on the Oracle VM/container:
 
 Never commit the worker token or put it in frontend JavaScript.
 
-## Run
+## Oracle instance bootstrap
+
+The repository includes `oracle-cloud-init.yaml` for the OCI instance's cloud-init/user-data field. Before using it, replace the token placeholder with the same random secret configured in Render. Do not commit the real token to GitHub.
+
+Create only an Always Free eligible `VM.Standard.A1.Flex` instance in your home region, set it to 2 OCPUs and 12 GB RAM, use an Always Free eligible Ubuntu image, and keep the boot volume within the included 200 GB combined block-volume allowance. Do not select paid shapes or upgrade the account.
+
+## Manual run (if cloud-init is unavailable)
 
 Build for ARM64 on the Oracle A1 VM:
 
