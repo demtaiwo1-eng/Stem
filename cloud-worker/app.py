@@ -21,7 +21,7 @@ MAX_UNPACKED_BYTES = int(os.getenv("STEM_MAX_UNPACKED_BYTES", str(1024 * 1024 * 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}
 STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 SESSION = requests.Session()
-SESSION.headers.update({"Authorization": f"Bearer {TOKEN}", "User-Agent": "STEM-Oracle-Free-Worker/1.0"})
+SESSION.headers.update({"Authorization": f"Bearer {TOKEN}", "User-Agent": "STEM-GitHub-Actions-Worker/1.0"})
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("stem-worker")
 torch.set_num_threads(max(1, int(os.getenv("STEM_CPU_THREADS", "2"))))
@@ -132,7 +132,7 @@ def report_failure(job_id, error):
 
 def handle_job(job):
     job_id = job["id"]
-    with tempfile.TemporaryDirectory(prefix="stem-oracle-") as temp:
+    with tempfile.TemporaryDirectory(prefix="stem-github-actions-") as temp:
         work = Path(temp)
         source = work / (safe_track_name(job["name"]) + (Path(job["name"]).suffix.lower() or ".audio"))
         download_input(job, source)
@@ -172,8 +172,35 @@ def main():
         raise SystemExit("STEM_API_BASE must be an HTTPS URL.")
     if not TOKEN or len(TOKEN) < 32:
         raise SystemExit("STEM_WORKER_TOKEN must be a random secret of at least 32 characters.")
+    one_shot = os.getenv("STEM_ONESHOT", "0").lower() in {"1", "true", "yes"}
+    if one_shot:
+        max_jobs = max(1, int(os.getenv("STEM_MAX_JOBS_PER_RUN", "3")))
+        log.info("STEM GitHub Actions CPU worker started in one-shot mode; model=%s threads=%s max_jobs=%s", MODEL_DEFAULT, torch.get_num_threads(), max_jobs)
+        for _ in range(max_jobs):
+            try:
+                response = SESSION.get(API_BASE + "/api/worker/jobs/next", timeout=60)
+                if response.status_code == 204:
+                    log.info("No queued STEM jobs. Exiting successfully.")
+                    break
+                response.raise_for_status()
+                job = response.json()
+                threading.Thread(target=heartbeat_loop, daemon=True, name="stem-heartbeat").start()
+                try:
+                    handle_job(job)
+                except Exception as exc:
+                    log.exception("Job %s failed", job.get("id"))
+                    report_failure(job.get("id"), exc)
+            except requests.RequestException:
+                log.exception("Could not reach STEM API; ending this runner attempt.")
+                raise
+            except Exception:
+                log.exception("Unexpected worker error; ending this runner attempt.")
+                raise
+        log.info("STEM GitHub Actions CPU runner finished.")
+        return
+
     threading.Thread(target=heartbeat_loop, daemon=True, name="stem-heartbeat").start()
-    log.info("STEM Oracle Always Free CPU worker started; model=%s threads=%s", MODEL_DEFAULT, torch.get_num_threads())
+    log.info("STEM GitHub Actions CPU worker started in continuous mode; model=%s threads=%s", MODEL_DEFAULT, torch.get_num_threads())
     while True:
         try:
             response = SESSION.get(API_BASE + "/api/worker/jobs/next", timeout=60)
