@@ -35,7 +35,7 @@ async function main() {
   const configResponse = await fetch(configUrl, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
   if (!configResponse.ok) throw new Error('GitHub Pages api-config.js returned HTTP ' + configResponse.status);
   const config = await configResponse.text();
-  const configuredApi = config.match(/window\\.STEM_API_BASE\\s*=\\s*(['\"])(.*?)\\1\\s*;/)?.[2];
+  const configuredApi = config.match(/window\.STEM_API_BASE\s*=\s*(['\"])(.*?)\1\s*;/)?.[2];
   if (configuredApi !== apiBase) {
     throw new Error('GitHub Pages is not yet serving the configured Render API URL (found: ' + (configuredApi || 'no valid STEM_API_BASE') + ').');
   }
