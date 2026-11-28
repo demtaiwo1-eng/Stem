@@ -370,7 +370,7 @@ app.get('/api/jobs/:id/stems/:index', asyncRoute(async (req, res) => {
   const key = String(file.objectKey || '');
   if (!key.startsWith('results/' + req.params.id + '/')) return res.status(404).json({ error: 'Stem not found.' });
   const range = String(req.get('range') || '');
-  if (range && !/^bytes=\\d*-\\d*$/.test(range)) return res.status(416).end();
+  if (range && !/^bytes=\d*-\d*$/.test(range)) return res.status(416).end();
   const command = new GetObjectCommand({ Bucket: BUCKET, Key: key, ...(range ? { Range: range } : {}) });
   const object = await s3.send(command);
   const fileName = safeName(path.basename(file.fileName || 'stem.wav'));
