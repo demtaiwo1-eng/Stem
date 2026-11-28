@@ -75,7 +75,6 @@ The health endpoint reports whether the worker token is configured and whether a
 ## Troubleshooting
 
 - **Workflow says STEM_WORKER_TOKEN is missing:** add the same secret to the repository's Actions secrets and Render environment.
-- **Uploads are accepted but remain queued:** check that GitHub Actions is enabled, the monthly runner quota is available, and the latest scheduled or dispatch workflow ran successfully.
-- **Dispatch does not start immediately:** configure the optional Render `GITHUB_ACTIONS_TOKEN`; otherwise the 30-minute scheduled fallback will pick up the queue.
+- **Uploads are accepted but remain queued:** check that GitHub Actions is enabled and the latest five-minute scheduled workflow ran successfully. GitHub may occasionally delay scheduled workflows.
 - **A job fails:** inspect the workflow logs. Large files and long tracks may exceed the free runner's time or memory limits.
 - **Do not enable Google Cloud billing or create a Compute Engine VM for this setup.**
