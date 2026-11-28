@@ -1,5 +1,3 @@
-import io
-import json
 import logging
 import os
 import shutil
@@ -135,7 +133,7 @@ def handle_job(job):
     job_id = job["id"]
     with tempfile.TemporaryDirectory(prefix="stem-oracle-") as temp:
         work = Path(temp)
-        source = work / ("input" + (Path(job["name"]).suffix.lower() or ".audio"))
+        source = work / (safe_track_name(job["name"]) + (Path(job["name"]).suffix.lower() or ".audio"))
         download_input(job, source)
         api("POST", f"/api/worker/jobs/{job_id}/progress", json={"progress": 15, "message": "Audio downloaded. Preparing tracks for CPU separation."})
         tracks = extract_tracks(source, job, work)
