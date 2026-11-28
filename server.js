@@ -7,9 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
-const { PassThrough } = require('node:stream');
 const { Pool } = require('pg');
-const archiver = require('archiver');
 const unzipper = require('unzipper');
 const { Upload } = require('@aws-sdk/lib-storage');
 const {
@@ -102,7 +100,8 @@ const publicJob = job => ({
   createdAt: job.created_at,
   outputFormat: job.output_format,
   results: job.status === 'completed' ? job.result_manifest?.files || [] : [],
-  downloadUrl: job.status === 'completed' ? '/api/jobs/' + job.id + '/download' : null
+  downloadUrl: job.status === 'completed' ? '/api/jobs/' + job.id + '/download' : null,
+  processor: job.processor || 'legacy'
 });
 
 async function updateJob(id, fields) {
@@ -143,38 +142,11 @@ async function getObjectStream(key) {
   return result;
 }
 
-async function signedInputUrl(key) {
-  return getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn: 60 * 60 * 3 });
-}
 
 
-async function extractZipAudioFiles(zipPath, destination) {
-  const directory = await unzipper.Open.file(zipPath);
-  const entries = directory.files.filter(entry =>
-    entry.type === 'File' && AUDIO_EXTENSIONS.has(path.extname(entry.path).toLowerCase())
-  );
-  if (!entries.length) throw new Error('The ZIP does not contain any supported audio tracks.');
-  if (entries.length > MAX_ZIP_TRACKS) throw new Error('This ZIP exceeds the ' + MAX_ZIP_TRACKS + ' audio-track limit.');
-  const unpackedBytes = entries.reduce((total, entry) => total + Number(entry.uncompressedSize || 0), 0);
-  if (unpackedBytes > MAX_ZIP_UNPACKED_MB * 1024 * 1024) {
-    throw new Error('The uncompressed audio in this ZIP exceeds the ' + MAX_ZIP_UNPACKED_MB + ' MB safety limit.');
-  }
-  await fs.promises.mkdir(destination, { recursive: true });
-  const extracted = [];
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    const originalName = safeName(path.basename(entry.path));
-    const localPath = path.join(destination, String(index + 1).padStart(2, '0') + '-' + originalName);
-    await pipeline(entry.stream(), fs.createWriteStream(localPath));
-    extracted.push({ originalName, localPath });
-  }
-  return extracted;
-}
 
-async function downloadObjectToFile(key, destination) {
-  const object = await getObjectStream(key);
-  await pipeline(object.Body, fs.createWriteStream(destination));
-}
+
+
 
 // Processing now runs through the open-source local Demucs worker or an optional free cloud worker. The API stores job state and results only.
 
@@ -210,7 +182,7 @@ app.post('/api/jobs/local', asyncRoute(async (req, res) => {
   const sizeBytes = Math.max(0, Number(req.body?.sizeBytes || 0));
   if (!sizeBytes || sizeBytes > MAX_UPLOAD_MB * 1024 * 1024) return res.status(400).json({ error: 'The selected file is empty or exceeds the upload limit.' });
   await pool.query(
-    "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',3,'Job saved. Waiting for a free Demucs processor…','',$3,$4,$5,$6,$7)",
+    "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type, processor) VALUES ($1,$2,'queued',3,'Job saved. Waiting for a free Demucs processor…','',$3,$4,$5,$6,$7,'local-demucs')",
     [id, originalName, MODEL, outputFormat, sizeBytes, String(req.body?.contentType || 'application/octet-stream'), sourceType]
   );
   res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id, processor: 'local-demucs' });
@@ -226,7 +198,7 @@ app.post('/api/jobs', uploadLimiter, upload.single('audio'), asyncRoute(async (r
   try {
     await uploadFile(inputKey, req.file.path, req.file.mimetype || 'application/octet-stream');
     await pool.query(
-      "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',3,'Upload saved. Waiting for a free Demucs processor…',$3,$4,$5,$6,$7,$8)",
+      "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type, processor) VALUES ($1,$2,'queued',3,'Upload saved. Waiting for a free Demucs processor…',$3,$4,$5,$6,$7,$8,'local-demucs')",
       [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream', ext === '.zip' ? 'zip' : 'audio']
     );
   } finally { await fs.promises.rm(req.file.path, { force: true }).catch(() => {}); }
