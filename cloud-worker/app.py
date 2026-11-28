@@ -11,7 +11,6 @@ import spaces
 import torch
 
 MODEL = os.getenv("STEM_MODEL", "htdemucs_6s")
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 @spaces.GPU
 def separate(audio_path, output_format):
@@ -20,11 +19,12 @@ def separate(audio_path, output_format):
     source = Path(audio_path)
     if source.suffix.lower() not in {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}:
         raise gr.Error("The free cloud fallback accepts one audio track at a time.")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     root = Path(tempfile.mkdtemp(prefix="stem-cloud-"))
     try:
         output = root / "output"
         output.mkdir()
-        command = ["python", "-m", "demucs", "--device", DEVICE, "-n", MODEL, "--out", str(output), str(source)]
+        command = ["python", "-m", "demucs", "--device", device, "-n", MODEL, "--out", str(output), str(source)]
         try:
             subprocess.run(command, check=True, capture_output=True, text=True, timeout=3600)
         except subprocess.CalledProcessError as exc:
