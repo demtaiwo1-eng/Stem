@@ -5,7 +5,7 @@ const rateLimit = require('express-rate-limit');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, timingSafeEqual } = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
 const { Pool } = require('pg');
 const unzipper = require('unzipper');
@@ -27,7 +27,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(os.tmpdir(), 'stem-jobs');
 const TMP_DIR = path.join(DATA_DIR, 'uploads');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 250);
 const MODEL = process.env.STEM_MODEL || 'htdemucs_6s';
-const PROCESSOR_MODE = process.env.STEM_PROCESSOR || 'local-first-demucs';
+const PROCESSOR_MODE = process.env.STEM_PROCESSOR || 'oracle-always-free-cpu';
 const RELEASE = process.env.STEM_RELEASE || 'hybrid-free';
 const BUCKET = process.env.STEM_BUCKET || 'stem-audio-private';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || 'https://demtaiwo1-eng.github.io')
@@ -93,6 +93,16 @@ const upload = multer({
 const resultUpload = multer({ dest: TMP_DIR, limits: { fileSize: Number(process.env.MAX_RESULT_MB || 2048) * 1024 * 1024 } });
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const safeName = name => path.basename(name).replace(/[^a-z0-9._-]/gi, '_').slice(0, 150) || 'audio';
+const WORKER_TOKEN = process.env.STEM_WORKER_TOKEN || '';
+function requireWorker(req, res, next) {
+  if (!WORKER_TOKEN) return res.status(503).json({ error: 'The remote processor is not configured yet.' });
+  const header = req.get('authorization') || '';
+  const supplied = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(WORKER_TOKEN);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return res.status(401).json({ error: 'Worker authorization failed.' });
+  next();
+}
 const publicJob = job => ({
   id: job.id,
   name: job.original_name,
@@ -169,11 +179,11 @@ app.get('/health', asyncRoute(async (_req, res) => {
 }));
 
 app.get('/api/capabilities', (_req, res) => res.json({
-  engine: 'Open-source Demucs', model: MODEL, providers: ['local-device', 'optional-free-cloud-worker'], processorMode: PROCESSOR_MODE,
+  engine: 'Open-source Demucs', model: MODEL, providers: ['oracle-always-free-cpu'], processorMode: PROCESSOR_MODE,
   sources: ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'], formats: ['wav', 'mp3'],
   maxUploadMB: MAX_UPLOAD_MB, zipUploads: true, maxZipTracks: MAX_ZIP_TRACKS,
   maxZipUnpackedMB: MAX_ZIP_UNPACKED_MB, persistentJobs: true, objectStorage: 'Neon Object Storage',
-  note: 'Local processing has no per-track API fee. Optional free cloud capacity is quota-limited and may be unavailable.'
+  note: 'Remote processing uses an Oracle Always Free CPU worker within the documented free-tier limits. Processing may be slower than GPU processing.'
 }));
 
 app.post('/api/jobs/local', asyncRoute(async (req, res) => {
@@ -200,11 +210,11 @@ app.post('/api/jobs', uploadLimiter, upload.single('audio'), asyncRoute(async (r
   try {
     await uploadFile(inputKey, req.file.path, req.file.mimetype || 'application/octet-stream');
     await pool.query(
-      "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type, processor) VALUES ($1,$2,'queued',3,'Upload saved. Waiting for a free Demucs processor…',$3,$4,$5,$6,$7,$8,'local-demucs')",
+      "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type, processor) VALUES ($1,$2,'queued',3,'Upload saved. Waiting for the Oracle Always Free Demucs worker…',$3,$4,$5,$6,$7,$8,'oracle-demucs')",
       [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream', ext === '.zip' ? 'zip' : 'audio']
     );
   } finally { await fs.promises.rm(req.file.path, { force: true }).catch(() => {}); }
-  res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id });
+  res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id, processor: 'oracle-demucs' });
 }));
 
 app.get('/api/jobs/:id', asyncRoute(async (req, res) => {
@@ -214,20 +224,15 @@ app.get('/api/jobs/:id', asyncRoute(async (req, res) => {
   res.json(publicJob(job));
 }));
 
-app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRoute(async (req, res) => {
-  const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
-  const job = jobResult.rows[0];
-  if (!job) return res.status(404).json({ error: 'Job not found.' });
-  if (!req.file) return res.status(400).json({ error: 'The processor did not return a result archive.' });
-  if (job.status === 'completed') return res.status(409).json({ error: 'This job already has completed results.' });
+async function persistResultArchive(job, archivePath, processorName) {
   const workDir = path.join(DATA_DIR, 'result-' + job.id + '-' + randomUUID());
   await fs.promises.mkdir(workDir, { recursive: true });
   try {
-    const directory = await unzipper.Open.file(req.file.path);
+    const directory = await unzipper.Open.file(archivePath);
     const entries = directory.files.filter(entry => entry.type === 'File' && AUDIO_EXTENSIONS.has(path.extname(entry.path).toLowerCase()));
     if (!entries.length || entries.length > 120) throw new Error('The result archive has no valid stems or contains too many files.');
     const archiveKey = 'results/' + job.id + '/stem-results.zip';
-    await uploadFile(archiveKey, req.file.path, 'application/zip');
+    await uploadFile(archiveKey, archivePath, 'application/zip');
     const manifestFiles = [];
     for (let index = 0; index < entries.length; index += 1) {
       const entry = entries[index];
@@ -251,14 +256,79 @@ app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRout
       ...file, downloadUrl: await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: file.objectKey }), { expiresIn: 60 * 60 })
     })));
     await updateJob(job.id, {
-      status: 'completed', progress: 100, message: 'Your stems are ready. Processed with open-source Demucs.',
-      result_key: archiveKey, result_manifest: { model: MODEL, processor: 'local-demucs', outputFormat: job.output_format || 'wav', files }, completed_at: new Date()
+      status: 'completed', progress: 100, message: 'Your stems are ready. Processed with open-source Demucs on the Oracle Always Free CPU worker.',
+      result_key: archiveKey, result_manifest: { model: job.model || MODEL, processor: processorName, outputFormat: job.output_format || 'wav', files }, completed_at: new Date()
     });
-    res.json({ id: job.id, status: 'completed', results: files.length });
+    return files.length;
   } finally {
-    await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
     await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRoute(async (req, res) => {
+  const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
+  const job = jobResult.rows[0];
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (job.processor !== 'local-demucs') return res.status(403).json({ error: 'This job is not assigned to the local processor.' });
+  if (!req.file) return res.status(400).json({ error: 'The processor did not return a result archive.' });
+  if (job.status === 'completed') return res.status(409).json({ error: 'This job already has completed results.' });
+  try {
+    const count = await persistResultArchive(job, req.file.path, 'local-demucs');
+    res.json({ id: job.id, status: 'completed', results: count });
+  } finally {
+    await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
+  }
+}));
+
+app.get('/api/worker/jobs/next', requireWorker, asyncRoute(async (_req, res) => {
+  await pool.query(
+    "UPDATE public.stem_jobs SET status='queued', progress=3, message='Worker lease expired; returned to queue.', updated_at=NOW() WHERE status='processing' AND processor='oracle-demucs' AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count < 3"
+  );
+  await pool.query(
+    "UPDATE public.stem_jobs SET status='failed', progress=100, message='The free worker could not finish this job after three attempts.', error='Worker lease expired three times.', updated_at=NOW() WHERE status='processing' AND processor='oracle-demucs' AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count >= 3"
+  );
+  const claimed = await pool.query(
+    "UPDATE public.stem_jobs AS job SET status='processing', progress=8, message='Accepted by the Oracle Always Free CPU worker.', attempt_count=job.attempt_count+1, updated_at=NOW() FROM (SELECT id FROM public.stem_jobs WHERE status='queued' AND processor='oracle-demucs' AND input_key <> '' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED) AS candidate WHERE job.id=candidate.id RETURNING job.id, job.original_name, job.input_key, job.model, job.output_format, job.source_type, job.input_size_bytes"
+  );
+  if (!claimed.rows.length) return res.status(204).end();
+  const job = claimed.rows[0];
+  const inputUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: job.input_key }), { expiresIn: 60 * 60 });
+  res.json({ id: job.id, name: job.original_name, model: job.model || MODEL, outputFormat: job.output_format || 'wav', sourceType: job.source_type || 'audio', inputSizeBytes: Number(job.input_size_bytes || 0), inputUrl });
+}));
+
+app.post('/api/worker/jobs/:id/progress', requireWorker, asyncRoute(async (req, res) => {
+  const progress = Math.max(8, Math.min(90, Number(req.body?.progress || 10)));
+  const message = String(req.body?.message || 'Demucs is processing this job.').slice(0, 240);
+  const result = await pool.query(
+    "UPDATE public.stem_jobs SET progress=$2, message=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND processor='oracle-demucs' RETURNING id",
+    [req.params.id, progress, message]
+  );
+  if (!result.rowCount) return res.status(409).json({ error: 'The job is no longer assigned to this worker.' });
+  res.json({ ok: true });
+}));
+
+app.post('/api/worker/jobs/:id/result', requireWorker, resultUpload.single('archive'), asyncRoute(async (req, res) => {
+  const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
+  const job = jobResult.rows[0];
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (job.processor !== 'oracle-demucs' || job.status !== 'processing') return res.status(409).json({ error: 'This job is not currently assigned to the Oracle worker.' });
+  if (!req.file) return res.status(400).json({ error: 'The worker did not return a result archive.' });
+  try {
+    const count = await persistResultArchive(job, req.file.path, 'oracle-always-free-demucs');
+    res.json({ id: job.id, status: 'completed', results: count });
+  } finally {
+    await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
+  }
+}));
+
+app.post('/api/worker/jobs/:id/fail', requireWorker, asyncRoute(async (req, res) => {
+  const message = String(req.body?.error || 'The Oracle Always Free worker could not process this audio.').slice(0, 1000);
+  const result = await pool.query(
+    "UPDATE public.stem_jobs SET status='failed', progress=100, message='Processing failed on the free CPU worker.', error=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND processor='oracle-demucs' RETURNING id",
+    [req.params.id, message]
+  );
+  if (!result.rowCount) return res.status(409).json({ error: 'The job is no longer assigned to this worker.' });
+  res.json({ id: req.params.id, status: 'failed' });
 }));
 
 app.get('/api/jobs/:id/results', asyncRoute(async (req, res) => {
