@@ -159,11 +159,21 @@ def handle_job(job):
         log.info("Job %s completed: %s tracks", job_id, len(tracks))
 
 
+def heartbeat_loop():
+    while True:
+        try:
+            api("POST", "/api/worker/heartbeat", timeout=20)
+        except Exception:
+            log.warning("Worker heartbeat failed; will retry.")
+        time.sleep(30)
+
+
 def main():
     if not API_BASE.startswith("https://") and not API_BASE.startswith("http://127.0.0.1"):
         raise SystemExit("STEM_API_BASE must be an HTTPS URL.")
     if not TOKEN or len(TOKEN) < 32:
         raise SystemExit("STEM_WORKER_TOKEN must be a random secret of at least 32 characters.")
+    threading.Thread(target=heartbeat_loop, daemon=True, name="stem-heartbeat").start()
     log.info("STEM Oracle Always Free CPU worker started; model=%s threads=%s", MODEL_DEFAULT, torch.get_num_threads())
     while True:
         try:
