@@ -19,16 +19,16 @@ jobs:
     steps:
       - name: Validate deployment configuration
         env:
-          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-          ZONE: ${{ vars.GCP_ZONE }}
-          VM_NAME: ${{ vars.GCP_VM_NAME }}
-          WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE }}
+          GCP_VM_NAME: ${{ vars.GCP_VM_NAME }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
-          for item in PROJECT_ID ZONE VM_NAME WIF_PROVIDER SERVICE_ACCOUNT; do
+          for item in GCP_PROJECT_ID GCP_ZONE GCP_VM_NAME GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT; do
             if [ -z "${!item}" ]; then
-              echo "::error::Missing GitHub Actions variable: GCP_${item#?}"
+              echo "::error::Missing GitHub Actions variable: $item"
               exit 1
             fi
           done
