@@ -212,7 +212,7 @@ app.get('/api/jobs/:id', asyncRoute(async (req, res) => {
   res.json(publicJob(job));
 }));
 
-app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRoute(async (req, res) => {
+app.post('/api/jobs/:id/local-result', uploadLimiter, resultUpload.single('archive'), asyncRoute(async (req, res) => {
   const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
   const job = jobResult.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
@@ -320,6 +320,7 @@ async function start() {
   )`);
   await pool.query('ALTER TABLE public.stem_jobs ADD COLUMN IF NOT EXISTS parent_job_id UUID REFERENCES public.stem_jobs(id) ON DELETE CASCADE');
   await pool.query("ALTER TABLE public.stem_jobs ADD COLUMN IF NOT EXISTS processor TEXT NOT NULL DEFAULT 'legacy'");
+  await pool.query("UPDATE public.stem_jobs SET status = 'failed', progress = 100, message = 'This older job used the retired hosted processor. Submit it again using free Demucs processing.', error = COALESCE(error, 'Previous hosted processor is no longer active.'), updated_at = NOW() WHERE processor = 'legacy' AND status IN ('queued','processing')");
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_parent_job_idx ON public.stem_jobs (parent_job_id) WHERE parent_job_id IS NOT NULL');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_status_created_idx ON public.stem_jobs (status, created_at)');
   app.listen(PORT, '0.0.0.0', () => { console.log('STEM free Demucs API listening on ' + PORT); });
