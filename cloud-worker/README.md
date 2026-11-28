@@ -71,3 +71,64 @@ The worker never receives Neon credentials. Audio moves between the worker and p
 ## Limitations
 
 CPU separation is slower than GPU processing. The e2-standard-2 machine is intended for initial integration and low-volume testing. Trial credit is temporary; once it ends, the worker stops unless someone deliberately upgrades to paid billing. Do not upgrade just to keep STEM running. Existing customer job history and files remain in Neon when the worker is stopped.
+
+
+## GitHub Actions → Google Cloud deployment (keyless)
+
+The repository now includes `.github/workflows/deploy-stem-gce-worker.yml`. It is a **manual deployment workflow**: when run, it authenticates to Google Cloud using GitHub OIDC / Workload Identity Federation and resets the existing worker VM. On boot, the startup script pulls the latest `main` branch, rebuilds the Docker image and starts the worker. It does not create VMs or change billing.
+
+Use Google Cloud Shell in the selected project for the one-time identity setup below. Replace the project ID if your project uses a different ID. These commands create IAM configuration only; they do not create a VM or upgrade billing.
+
+```bash
+PROJECT_ID="YOUR_GOOGLE_CLOUD_PROJECT_ID"
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+POOL_ID="github-actions"
+PROVIDER_ID="github-stem"
+SA_NAME="stem-github-deployer"
+SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+gcloud services enable iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com compute.googleapis.com --project "$PROJECT_ID"
+
+gcloud iam service-accounts create "$SA_NAME" --project "$PROJECT_ID" --display-name="STEM GitHub Actions deployer"
+
+gcloud iam workload-identity-pools create "$POOL_ID" --project "$PROJECT_ID" --location="global" --display-name="GitHub Actions"
+
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_ID" \
+  --project "$PROJECT_ID" --location="global" --workload-identity-pool="$POOL_ID" \
+  --display-name="STEM GitHub repository" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+  --attribute-condition="assertion.repository == 'demtaiwo1-eng/Stem' && assertion.ref == 'refs/heads/main'"
+
+gcloud iam roles create stemWorkerRestarter --project "$PROJECT_ID" \
+  --title="STEM worker restarter" --description="Only inspect and reset the STEM worker VM" \
+  --permissions="compute.instances.get,compute.instances.reset" --stage="GA"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$SA_EMAIL" \
+  --role="projects/$PROJECT_ID/roles/stemWorkerRestarter"
+
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" --project "$PROJECT_ID" \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$POOL_ID/attribute.repository/demtaiwo1-eng/Stem"
+
+echo "WIF provider:"
+gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
+  --project "$PROJECT_ID" --location="global" --workload-identity-pool="$POOL_ID" \
+  --format="value(name)"
+echo "Service account: $SA_EMAIL"
+```
+
+Then open the STEM GitHub repository → **Settings → Secrets and variables → Actions → Variables** and add these repository variables (not secrets):
+
+| Variable | Value |
+|---|---|
+| `GCP_PROJECT_ID` | Your project ID |
+| `GCP_ZONE` | The zone selected for the VM, e.g. `us-central1-a` |
+| `GCP_VM_NAME` | `stem-cpu-worker` |
+| `GCP_WIF_PROVIDER` | The full provider resource name printed by the final command |
+| `GCP_SERVICE_ACCOUNT` | The service-account email printed above |
+
+After the VM exists and the startup script and private worker token are configured, go to **Actions → Deploy STEM worker to Google Compute Engine → Run workflow**. The workflow restarts the VM; the startup script then deploys the latest worker from GitHub. It does not store a service-account JSON key in GitHub.
+
+**Important:** the service account is restricted to this repository's `main` branch and to the custom role containing only VM read/reset permissions. Do not broaden the provider condition or grant Owner/Editor. The workflow will fail until the five GitHub variables are set and the VM exists. The Google Cloud VM itself still consumes trial credit or billing while running; this workflow does not make it free.
