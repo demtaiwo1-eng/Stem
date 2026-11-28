@@ -1,12 +1,10 @@
 name: STEM Free CPU Audio Worker
 
 on:
-  repository_dispatch:
-    types: [stem-job-queued]
   workflow_dispatch:
   schedule:
-    # Fallback queue sweep in case a dispatch is missed.
-    - cron: "17,47 * * * *"
+    # Poll the queue every five minutes; public-repository standard runners are free.
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
