@@ -172,10 +172,11 @@ async function getObjectStream(key) {
 
 app.get('/health', asyncRoute(async (_req, res) => {
   await pool.query('SELECT 1');
+  const heartbeat = await pool.query("SELECT EXISTS (SELECT 1 FROM public.stem_worker_heartbeats WHERE last_seen_at > NOW() - INTERVAL '2 minutes') AS online");
   const storageProbeKey = 'health-checks/' + randomUUID() + '.txt';
   await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: storageProbeKey, Body: 'STEM storage connection check', ContentType: 'text/plain' }));
   await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: storageProbeKey }));
-  res.json({ ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY), service: 'STEM Audio Workbench', version: '4.0.0', database: 'connected', objectStorage: true, processing: PROCESSOR_MODE, release: RELEASE, bucket: BUCKET });
+  res.json({ ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY), service: 'STEM Audio Workbench', version: '4.0.0', database: 'connected', objectStorage: true, processing: PROCESSOR_MODE, workerConfigured: Boolean(WORKER_TOKEN), workerOnline: Boolean(heartbeat.rows[0]?.online), release: RELEASE, bucket: BUCKET });
 }));
 
 app.get('/api/capabilities', (_req, res) => res.json({
@@ -281,6 +282,7 @@ app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRout
 }));
 
 app.get('/api/worker/jobs/next', requireWorker, asyncRoute(async (_req, res) => {
+  await pool.query("INSERT INTO public.stem_worker_heartbeats (worker_id, last_seen_at) VALUES ('oracle-a1', NOW()) ON CONFLICT (worker_id) DO UPDATE SET last_seen_at=NOW()");
   await pool.query(
     "UPDATE public.stem_jobs SET status='queued', progress=3, message='Worker lease expired; returned to queue.', updated_at=NOW() WHERE status='processing' AND processor='oracle-demucs' AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count < 3"
   );
@@ -296,7 +298,13 @@ app.get('/api/worker/jobs/next', requireWorker, asyncRoute(async (_req, res) => 
   res.json({ id: job.id, name: job.original_name, model: job.model || MODEL, outputFormat: job.output_format || 'wav', sourceType: job.source_type || 'audio', inputSizeBytes: Number(job.input_size_bytes || 0), inputUrl });
 }));
 
+app.post('/api/worker/heartbeat', requireWorker, asyncRoute(async (_req, res) => {
+  await pool.query("INSERT INTO public.stem_worker_heartbeats (worker_id, last_seen_at) VALUES ('oracle-a1', NOW()) ON CONFLICT (worker_id) DO UPDATE SET last_seen_at=NOW()");
+  res.json({ ok: true });
+}));
+
 app.post('/api/worker/jobs/:id/progress', requireWorker, asyncRoute(async (req, res) => {
+  await pool.query("INSERT INTO public.stem_worker_heartbeats (worker_id, last_seen_at) VALUES ('oracle-a1', NOW()) ON CONFLICT (worker_id) DO UPDATE SET last_seen_at=NOW()");
   const progress = Math.max(8, Math.min(90, Number(req.body?.progress || 10)));
   const message = String(req.body?.message || 'Demucs is processing this job.').slice(0, 240);
   const result = await pool.query(
@@ -401,6 +409,7 @@ async function start() {
   await pool.query("UPDATE public.stem_jobs SET status = 'failed', progress = 100, message = 'This older job used the retired hosted processor. Submit it again using free Demucs processing.', error = COALESCE(error, 'Previous hosted processor is no longer active.'), updated_at = NOW() WHERE processor = 'legacy' AND status IN ('queued','processing')");
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_parent_job_idx ON public.stem_jobs (parent_job_id) WHERE parent_job_id IS NOT NULL');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_status_created_idx ON public.stem_jobs (status, created_at)');
+  await pool.query('CREATE TABLE IF NOT EXISTS public.stem_worker_heartbeats (worker_id TEXT PRIMARY KEY, last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW())');
   app.listen(PORT, '0.0.0.0', () => { console.log('STEM free Demucs API listening on ' + PORT); });
 
 }
