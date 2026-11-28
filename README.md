@@ -25,7 +25,7 @@ The worker defaults to CPU mode for compatibility. CPU processing can take a lon
 
 ## Optional free cloud fallback
 
-The cloud-worker directory is a Hugging Face Spaces Gradio ZeroGPU template. Create a public ZeroGPU Space from that folder, then set window.STEM_CLOUD_WORKER_URL in the frontend api-config.js to the Space's https://<space-name>.hf.space URL. The local worker is always tried first. ZeroGPU has free usage quotas, eligibility requirements and availability limits; it is not unlimited cloud compute.
+The cloud-worker directory contains the files for a Hugging Face Spaces Gradio ZeroGPU template. Create a new public ZeroGPU Space, copy cloud-worker/app.py, cloud-worker/requirements.txt and cloud-worker/README.md into the Space root, then set window.STEM_CLOUD_WORKER_URL in the frontend api-config.js to the Space's https://<space-name>.hf.space URL. The local worker is always tried first. ZeroGPU has free usage quotas, eligibility requirements and availability limits; it is not unlimited cloud compute.
 
 ## STEM Neon resources
 
