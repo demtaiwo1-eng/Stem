@@ -1,0 +1,24 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - docker.io
+  - git
+  - ca-certificates
+
+write_files:
+  - path: /etc/stem-worker.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      STEM_API_BASE=https://stem-api-o0ij.onrender.com
+      STEM_WORKER_TOKEN=REPLACE_WITH_THE_SAME_RANDOM_SECRET_SET_IN_RENDER
+      STEM_MODEL=htdemucs_6s
+      STEM_CPU_THREADS=2
+      STEM_POLL_SECONDS=8
+
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [git, clone, --depth, "1", https://github.com/demtaiwo1-eng/Stem.git, /opt/stem]
+  - [docker, build, --pull, -t, stem-oracle-worker, /opt/stem/cloud-worker]
+  - [docker, run, -d, --name, stem-oracle-worker, --restart, unless-stopped, --cpus=2, --memory=10g, --env-file, /etc/stem-worker.env, stem-oracle-worker]
