@@ -14,6 +14,7 @@ const unzipper = require('unzipper');
 const { Upload } = require('@aws-sdk/lib-storage');
 const {
   S3Client,
+  HeadBucketCommand,
   GetObjectCommand
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -432,6 +433,8 @@ async function processFalJob(id) {
 
 app.get('/health', asyncRoute(async (_req, res) => {
   await pool.query('SELECT 1');
+  // Verify the configured Neon S3 credentials and private bucket, not just env presence.
+  await s3.send(new HeadBucketCommand({ Bucket: BUCKET }));
   res.json({
     ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && FAL_API_KEY),
     service: 'STEM Audio Workbench',
