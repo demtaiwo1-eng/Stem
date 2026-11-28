@@ -94,6 +94,23 @@ const resultUpload = multer({ dest: TMP_DIR, limits: { fileSize: Number(process.
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const safeName = name => path.basename(name).replace(/[^a-z0-9._-]/gi, '_').slice(0, 150) || 'audio';
 const WORKER_TOKEN = process.env.STEM_WORKER_TOKEN || '';
+
+// Protect worker-only endpoints with a shared bearer token. Never accept requests
+// when the secret is unset, and compare equal-length buffers in constant time.
+function requireWorker(req, res, next) {
+  if (!WORKER_TOKEN) {
+    return res.status(503).json({ error: 'The worker is not configured on this API.' });
+  }
+  const authorization = String(req.get('authorization') || '');
+  const match = authorization.match(/^Bearer\\s+(.+)$/i);
+  if (!match) return res.status(401).json({ error: 'Worker authorization is required.' });
+  const supplied = Buffer.from(match[1]);
+  const expected = Buffer.from(WORKER_TOKEN);
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+    return res.status(401).json({ error: 'Worker authorization failed.' });
+  }
+  return next();
+}
 const publicJob = job => ({
   id: job.id,
   name: job.original_name,
