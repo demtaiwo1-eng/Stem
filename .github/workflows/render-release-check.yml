@@ -1,0 +1,34 @@
+name: STEM Render release check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/render-release-check.mjs'
+      - '.github/workflows/render-release-check.yml'
+      - 'server.js'
+      - 'Dockerfile'
+      - 'package.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stem-render-release-check
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Wait for Render and verify frontend connection
+        env:
+          STEM_API_BASE: https://stem-api-o0ij.onrender.com
+          STEM_FRONTEND_URL: https://demtaiwo1-eng.github.io/stem.github.io/
+        run: node scripts/render-release-check.mjs
