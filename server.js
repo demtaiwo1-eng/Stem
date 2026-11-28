@@ -102,7 +102,7 @@ function requireWorker(req, res, next) {
     return res.status(503).json({ error: 'The worker is not configured on this API.' });
   }
   const authorization = String(req.get('authorization') || '');
-  const match = authorization.match(/^Bearer\\s+(.+)$/i);
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
   if (!match) return res.status(401).json({ error: 'Worker authorization is required.' });
   const supplied = Buffer.from(match[1]);
   const expected = Buffer.from(WORKER_TOKEN);
