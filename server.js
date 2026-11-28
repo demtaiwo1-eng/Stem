@@ -8,6 +8,7 @@ const os = require('node:os');
 const { randomUUID, timingSafeEqual } = require('node:crypto');
 const { pipeline } = require('node:stream/promises');
 const { Pool } = require('pg');
+const archiver = require('archiver');
 const unzipper = require('unzipper');
 const { Upload } = require('@aws-sdk/lib-storage');
 const {
@@ -385,14 +386,70 @@ app.get('/api/jobs/:id/stems/:index', asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/jobs/:id/download', asyncRoute(async (req, res) => {
-  const result = await pool.query('SELECT original_name, status, result_key FROM public.stem_jobs WHERE id = $1', [req.params.id]);
+  const result = await pool.query(
+    'SELECT original_name, status, result_manifest, result_key FROM public.stem_jobs WHERE id = $1',
+    [req.params.id]
+  );
   const job = result.rows[0];
-  if (!job || job.status !== 'completed' || !job.result_key) return res.status(404).json({ error: 'Result is not ready.' });
-  const object = await getObjectStream(job.result_key);
+  if (!job || job.status !== 'completed') return res.status(404).json({ error: 'Result is not ready.' });
+
+  const manifestFiles = Array.isArray(job.result_manifest?.files) ? job.result_manifest.files : [];
+  const archiveName = 'STEM-' + safeName(job.original_name).replace(/\.[^.]+$/, '') + '-stems.zip';
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', 'attachment; filename="STEM-' + safeName(job.original_name) + '-stems.zip"');
-  if (object.ContentLength) res.setHeader('Content-Length', String(object.ContentLength));
-  await pipeline(object.Body, res);
+  res.setHeader('Content-Disposition', 'attachment; filename="' + archiveName + '"');
+  res.setHeader('Cache-Control', 'private, no-store');
+
+  // Older jobs may only have the original worker-created archive. Keep those downloadable.
+  if (!manifestFiles.length) {
+    if (!job.result_key) return res.status(404).json({ error: 'No downloadable stems were found.' });
+    const storedArchive = await getObjectStream(job.result_key);
+    if (storedArchive.ContentLength != null) res.setHeader('Content-Length', String(storedArchive.ContentLength));
+    await pipeline(storedArchive.Body, res);
+    return;
+  }
+
+  // Rebuild the ZIP from the verified private stem objects. This avoids serving a
+  // damaged/stale worker ZIP and makes the bundle independent of signed URL expiry.
+  const zip = archiver('zip', { zlib: { level: 0 } });
+  zip.on('warning', error => {
+    if (error.code === 'ENOENT') console.warn('STEM ZIP warning:', error.message);
+    else zip.emit('error', error);
+  });
+  zip.on('error', error => {
+    console.error('STEM ZIP creation failed:', error.message);
+    if (!res.headersSent) res.status(500).end('Unable to package the stem files.');
+    else res.destroy(error);
+  });
+  res.on('close', () => {
+    if (!res.writableEnded) zip.destroy();
+  });
+  zip.pipe(res);
+
+  const usedNames = new Set();
+  for (const file of manifestFiles) {
+    const key = String(file.objectKey || '');
+    if (!key.startsWith('results/' + req.params.id + '/')) {
+      throw new Error('A stem object does not belong to this job.');
+    }
+    const relativeName = String(file.fileName || path.basename(key))
+      .replace(/\\/g, '/')
+      .split('/')
+      .filter(part => part && part !== '.' && part !== '..')
+      .map(part => safeName(part))
+      .join('/') || 'stem.wav';
+    let entryName = relativeName;
+    if (usedNames.has(entryName)) {
+      const ext = path.posix.extname(entryName);
+      const base = entryName.slice(0, -ext.length);
+      let suffix = 2;
+      while (usedNames.has(base + '-' + suffix + ext)) suffix += 1;
+      entryName = base + '-' + suffix + ext;
+    }
+    usedNames.add(entryName);
+    const storedStem = await getObjectStream(key);
+    zip.append(storedStem.Body, { name: entryName });
+  }
+  await zip.finalize();
 }));
 
 app.use((err, _req, res, _next) => {
