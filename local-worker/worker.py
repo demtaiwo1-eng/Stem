@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import imageio_ffmpeg
 
 APP_ORIGINS = [x.strip() for x in os.getenv("STEM_ALLOWED_ORIGINS", "https://demtaiwo1-eng.github.io").split(",") if x.strip()]
@@ -30,6 +30,9 @@ app.add_middleware(
 
 @app.middleware("http")
 async def private_network_access(request, call_next):
+    origin = request.headers.get("origin")
+    if origin and origin not in APP_ORIGINS:
+        return JSONResponse({"detail": "Origin is not allowed to use the STEM local processor."}, status_code=403)
     response = await call_next(request)
     response.headers["Access-Control-Allow-Private-Network"] = "true"
     return response
