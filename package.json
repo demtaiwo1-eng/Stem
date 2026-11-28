@@ -7,11 +7,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check scripts/release-gate.mjs",
+    "check": "node --check server.js && node --check public/app.js && node --check scripts/release-gate.mjs && node --check scripts/render-release-check.mjs",
     "release:gate": "node scripts/release-gate.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.850.0",
