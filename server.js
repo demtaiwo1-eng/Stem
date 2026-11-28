@@ -19,6 +19,9 @@ const {
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
+// Render terminates TLS and forwards requests through one trusted proxy hop.
+// This lets express-rate-limit identify the original client safely.
+app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT || 8787);
 const DATA_DIR = process.env.DATA_DIR || path.join(os.tmpdir(), 'stem-jobs');
 const TMP_DIR = path.join(DATA_DIR, 'uploads');
