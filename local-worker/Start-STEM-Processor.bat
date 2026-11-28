@@ -4,14 +4,16 @@ cd /d "%~dp0"
 echo STEM Local Processor - first-time setup
 where py >nul 2>nul
 if errorlevel 1 (
-  echo Python 3.10-3.12 is required. Install it from https://www.python.org/downloads/windows/
+  echo Install Python 3.11 or 3.12 from https://www.python.org/downloads/windows/
+  echo Select Add Python to PATH during installation.
   pause
   exit /b 1
 )
 if not exist ".venv\Scripts\python.exe" (
-  py -3 -m venv .venv
+  py -3.12 -m venv .venv 2>nul
+  if errorlevel 1 py -3.11 -m venv .venv
   if errorlevel 1 (
-    echo Could not create the Python environment.
+    echo Python 3.11 or 3.12 is required.
     pause
     exit /b 1
   )
