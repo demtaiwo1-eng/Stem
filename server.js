@@ -284,13 +284,13 @@ app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRout
 app.get('/api/worker/jobs/next', requireWorker, asyncRoute(async (_req, res) => {
   await pool.query("INSERT INTO public.stem_worker_heartbeats (worker_id, last_seen_at) VALUES ('google-compute-engine', NOW()) ON CONFLICT (worker_id) DO UPDATE SET last_seen_at=NOW()");
   await pool.query(
-    "UPDATE public.stem_jobs SET status='queued', progress=3, message='Worker lease expired; returned to queue.', updated_at=NOW() WHERE status='processing' AND processor='cloud-demucs' AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count < 3"
+    "UPDATE public.stem_jobs SET status='queued', progress=3, message='Worker lease expired; returned to queue.', updated_at=NOW() WHERE status='processing' AND processor IN ('cloud-demucs','oracle-demucs') AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count < 3"
   );
   await pool.query(
-    "UPDATE public.stem_jobs SET status='failed', progress=100, message='The free worker could not finish this job after three attempts.', error='Worker lease expired three times.', updated_at=NOW() WHERE status='processing' AND processor='cloud-demucs' AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count >= 3"
+    "UPDATE public.stem_jobs SET status='failed', progress=100, message='The free worker could not finish this job after three attempts.', error='Worker lease expired three times.', updated_at=NOW() WHERE status='processing' AND processor IN ('cloud-demucs','oracle-demucs') AND updated_at < NOW() - INTERVAL '90 minutes' AND attempt_count >= 3"
   );
   const claimed = await pool.query(
-    "UPDATE public.stem_jobs AS job SET status='processing', progress=8, message='Accepted by the Google Compute Engine CPU worker.', attempt_count=job.attempt_count+1, updated_at=NOW() FROM (SELECT id FROM public.stem_jobs WHERE status='queued' AND processor='cloud-demucs' AND input_key <> '' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED) AS candidate WHERE job.id=candidate.id RETURNING job.id, job.original_name, job.input_key, job.model, job.output_format, job.source_type, job.input_size_bytes"
+    "UPDATE public.stem_jobs AS job SET status='processing', progress=8, message='Accepted by the Google Compute Engine CPU worker.', attempt_count=job.attempt_count+1, updated_at=NOW() FROM (SELECT id FROM public.stem_jobs WHERE status='queued' AND processor IN ('cloud-demucs','oracle-demucs') AND input_key <> '' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED) AS candidate WHERE job.id=candidate.id RETURNING job.id, job.original_name, job.input_key, job.model, job.output_format, job.source_type, job.input_size_bytes"
   );
   if (!claimed.rows.length) return res.status(204).end();
   const job = claimed.rows[0];
@@ -308,7 +308,7 @@ app.post('/api/worker/jobs/:id/progress', requireWorker, asyncRoute(async (req, 
   const progress = Math.max(8, Math.min(90, Number(req.body?.progress || 10)));
   const message = String(req.body?.message || 'Demucs is processing this job.').slice(0, 240);
   const result = await pool.query(
-    "UPDATE public.stem_jobs SET progress=$2, message=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND processor='cloud-demucs' RETURNING id",
+    "UPDATE public.stem_jobs SET progress=$2, message=$3, updated_at=NOW() WHERE id=$1 AND status='processing' AND processor IN ('cloud-demucs','oracle-demucs') RETURNING id",
     [req.params.id, progress, message]
   );
   if (!result.rowCount) return res.status(409).json({ error: 'The job is no longer assigned to this worker.' });
@@ -319,7 +319,7 @@ app.post('/api/worker/jobs/:id/result', requireWorker, resultUpload.single('arch
   const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
   const job = jobResult.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
-  if (job.processor !== 'cloud-demucs' || job.status !== 'processing') return res.status(409).json({ error: 'This job is not currently assigned to the Google Cloud worker.' });
+  if (!['cloud-demucs', 'oracle-demucs'].includes(job.processor) || job.status !== 'processing') return res.status(409).json({ error: 'This job is not currently assigned to the Google Cloud worker.' });
   if (!req.file) return res.status(400).json({ error: 'The worker did not return a result archive.' });
   try {
     const count = await persistResultArchive(job, req.file.path, 'google-compute-engine-demucs');
@@ -332,7 +332,7 @@ app.post('/api/worker/jobs/:id/result', requireWorker, resultUpload.single('arch
 app.post('/api/worker/jobs/:id/fail', requireWorker, asyncRoute(async (req, res) => {
   const message = String(req.body?.error || 'The Google Cloud worker could not process this audio.').slice(0, 1000);
   const result = await pool.query(
-    "UPDATE public.stem_jobs SET status='failed', progress=100, message='Processing failed on the free CPU worker.', error=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND processor='cloud-demucs' RETURNING id",
+    "UPDATE public.stem_jobs SET status='failed', progress=100, message='Processing failed on the free CPU worker.', error=$2, updated_at=NOW() WHERE id=$1 AND status='processing' AND processor IN ('cloud-demucs','oracle-demucs') RETURNING id",
     [req.params.id, message]
   );
   if (!result.rowCount) return res.status(409).json({ error: 'The job is no longer assigned to this worker.' });
