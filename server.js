@@ -29,9 +29,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(os.tmpdir(), 'stem-jobs');
 const TMP_DIR = path.join(DATA_DIR, 'uploads');
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 250);
 const MODEL = process.env.STEM_MODEL || 'htdemucs_6s';
-const FAL_MODEL = process.env.FAL_MODEL || 'fal-ai/demucs';
 const BUCKET = process.env.STEM_BUCKET || 'stem-audio-private';
-const FAL_API_KEY = process.env.FAL_API_KEY || '';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || 'https://demtaiwo1-eng.github.io')
   .split(',').map(value => value.trim()).filter(Boolean);
 const pool = new Pool({
@@ -50,7 +48,6 @@ const s3 = new S3Client({
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
   } : undefined
 });
-const activeJobs = new Set();
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.opus']);
 const MAX_ZIP_TRACKS = Number(process.env.MAX_ZIP_TRACKS || 20);
 const MAX_ZIP_UNPACKED_MB = Number(process.env.MAX_ZIP_UNPACKED_MB || 1024);
@@ -93,6 +90,7 @@ const upload = multer({
   }
 });
 
+const resultUpload = multer({ dest: TMP_DIR, limits: { fileSize: Number(process.env.MAX_RESULT_MB || 2048) * 1024 * 1024 } });
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const safeName = name => path.basename(name).replace(/[^a-z0-9._-]/gi, '_').slice(0, 150) || 'audio';
 const publicJob = job => ({
@@ -179,345 +177,109 @@ async function downloadObjectToFile(key, destination) {
   await pipeline(object.Body, fs.createWriteStream(destination));
 }
 
-async function processZipJob(parentId) {
-  if (activeJobs.has(parentId)) return;
-  activeJobs.add(parentId);
-  let jobDir;
-  try {
-    const parentResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [parentId]);
-    const parent = parentResult.rows[0];
-    if (!parent || ['completed', 'failed'].includes(parent.status)) return;
-    const childResult = await pool.query(
-      'SELECT * FROM public.stem_jobs WHERE parent_job_id = $1 ORDER BY created_at ASC',
-      [parentId]
-    );
-    const children = childResult.rows;
-    if (!children.length) throw new Error('No audio tracks were found in the ZIP package.');
-    for (const child of children) {
-      if (['queued', 'processing'].includes(child.status)) void processFalJob(child.id);
-    }
-    const failed = children.filter(child => child.status === 'failed');
-    if (failed.length) {
-      await updateJob(parentId, {
-        status: 'failed',
-        progress: 100,
-        message: failed.length + ' track(s) could not be separated. Please check the ZIP contents and try again.',
-        error: failed.map(child => child.original_name + ': ' + child.message).join('\\n')
-      });
-      return;
-    }
-    const completed = children.filter(child => child.status === 'completed');
-    const progress = Math.round(children.reduce((total, child) => total + Number(child.progress || 0), 0) / children.length);
-    if (completed.length !== children.length) {
-      await updateJob(parentId, {
-        status: 'processing',
-        progress: Math.min(95, progress),
-        message: 'Separating ' + completed.length + ' of ' + children.length + ' tracks from your ZIP package…'
-      });
-      return;
-    }
-    jobDir = path.join(DATA_DIR, parentId);
-    await fs.promises.mkdir(jobDir, { recursive: true });
-    const archiveFiles = [];
-    const manifestFiles = [];
-    for (const child of completed) {
-      const trackFolder = safeName(path.parse(child.original_name).name);
-      for (const stemFile of child.result_manifest?.files || []) {
-        const localPath = path.join(jobDir, trackFolder + '-' + stemFile.fileName);
-        await downloadObjectToFile(stemFile.objectKey, localPath);
-        const fileName = trackFolder + '/' + stemFile.fileName;
-        archiveFiles.push({ localPath, fileName });
-        manifestFiles.push({
-          track: child.original_name,
-          stem: stemFile.stem,
-          fileName,
-          objectKey: stemFile.objectKey,
-          sizeBytes: stemFile.sizeBytes,
-          contentType: stemFile.contentType
-        });
-      }
-    }
-    const resultKey = await buildArchive(parentId, archiveFiles);
-    await updateJob(parentId, {
-      status: 'completed',
-      progress: 100,
-      message: 'All ' + children.length + ' tracks are separated. Your ZIP pack is ready.',
-      result_key: resultKey,
-      result_manifest: { model: MODEL, outputFormat: parent.output_format, tracks: children.length, files: manifestFiles },
-      completed_at: new Date()
-    });
-  } catch (error) {
-    console.error('STEM ZIP job failed:', parentId, error.message);
-    await updateJob(parentId, {
-      status: 'failed',
-      progress: 100,
-      message: error.message || 'ZIP processing failed.',
-      error: error.stack || error.message
-    }).catch(dbError => console.error('Could not persist ZIP failure:', dbError.message));
-  } finally {
-    if (jobDir) await fs.promises.rm(jobDir, { recursive: true, force: true }).catch(() => {});
-    activeJobs.delete(parentId);
-  }
-}
+// Processing now runs through the open-source local Demucs worker or an optional free cloud worker. The API stores job state and results only.
 
-async function submitFalJob(job) {
-  if (!FAL_API_KEY) throw new Error('FAL_API_KEY is not configured on the server.');
-  const audioUrl = await signedInputUrl(job.input_key);
-  const response = await fetch('https://queue.fal.run/' + FAL_MODEL, {
-    method: 'POST',
-    headers: {
-      Authorization: 'Key ' + FAL_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      input: {
-        audio_url: audioUrl,
-        model: MODEL,
-        stems: ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'],
-        output_format: job.output_format || 'wav'
-      }
-    }),
-    signal: AbortSignal.timeout(30000)
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.detail || payload.error || 'FAL rejected the separation request (' + response.status + ').');
-  }
-  if (!payload.request_id || !payload.status_url || !payload.response_url) {
-    throw new Error('FAL returned an incomplete queue response.');
-  }
-  await updateJob(job.id, {
-    status: 'processing',
-    progress: 12,
-    message: 'FAL Demucs accepted your audio. Waiting for six separated stems…',
-    fal_request_id: payload.request_id,
-    fal_status_url: payload.status_url,
-    fal_response_url: payload.response_url,
-    attempt_count: Number(job.attempt_count || 0) + 1
-  });
-}
 
-async function downloadRemoteFile(url, destination) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
-  if (!response.ok || !response.body) {
-    throw new Error('Could not retrieve a finished audio stem (' + response.status + ').');
-  }
-  await pipeline(response.body, fs.createWriteStream(destination));
-  return {
-    contentType: response.headers.get('content-type') || 'audio/mpeg',
-    sizeBytes: Number(response.headers.get('content-length') || 0)
-  };
-}
 
-async function buildArchive(jobId, files) {
-  const resultKey = 'results/' + jobId + '/stem-results.zip';
-  const archive = archiver('zip', { zlib: { level: 5 } });
-  const stream = new PassThrough();
-  const uploader = new Upload({
-    client: s3,
-    params: {
-      Bucket: BUCKET,
-      Key: resultKey,
-      Body: stream,
-      ContentType: 'application/zip'
-    },
-    queueSize: 4,
-    partSize: 8 * 1024 * 1024,
-    leavePartsOnError: false
-  });
-  archive.on('error', error => stream.destroy(error));
-  archive.pipe(stream);
-  for (const file of files) archive.file(file.localPath, { name: file.fileName });
-  const uploadPromise = uploader.done();
-  await archive.finalize();
-  await uploadPromise;
-  return resultKey;
-}
 
-async function finishFalJob(job) {
-  const response = await fetch(job.fal_response_url, { signal: AbortSignal.timeout(60000) });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || 'FAL result retrieval failed (' + response.status + ').');
-  const stems = ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'];
-  const jobDir = path.join(DATA_DIR, job.id);
-  await fs.promises.mkdir(jobDir, { recursive: true });
-  const files = [];
-  try {
-    for (const stem of stems) {
-      const item = payload[stem];
-      if (!item?.url) continue;
-      const ext = (job.output_format || 'wav') === 'wav' ? 'wav' : 'mp3';
-      const fileName = stem + '.' + ext;
-      const objectKey = 'results/' + job.id + '/' + fileName;
-      const localPath = path.join(jobDir, fileName);
-      const remote = await downloadRemoteFile(item.url, localPath);
-      await uploadFile(objectKey, localPath, remote.contentType);
-      const stat = await fs.promises.stat(localPath);
-      files.push({
-        stem,
-        fileName,
-        objectKey,
-        sizeBytes: stat.size,
-        contentType: remote.contentType,
-        localPath
-      });
-    }
-    if (files.length < 4) throw new Error('FAL returned fewer than four expected stems; the result was not published.');
-    const resultKey = await buildArchive(job.id, files);
-    const manifestFiles = await Promise.all(files.map(async file => ({
-      stem: file.stem,
-      fileName: file.fileName,
-      objectKey: file.objectKey,
-      sizeBytes: file.sizeBytes,
-      contentType: file.contentType,
-      downloadUrl: await getSignedUrl(s3, new GetObjectCommand({
-        Bucket: BUCKET,
-        Key: file.objectKey
-      }), { expiresIn: 60 * 60 })
-    })));
-    await updateJob(job.id, {
-      status: 'completed',
-      progress: 100,
-      message: 'Your separated stems are ready to preview and download.',
-      result_key: resultKey,
-      result_manifest: { model: MODEL, outputFormat: job.output_format || 'wav', files: manifestFiles },
-      completed_at: new Date()
-    });
-  } finally {
-    await fs.promises.rm(jobDir, { recursive: true, force: true }).catch(() => {});
-  }
-}
 
-async function processFalJob(id) {
-  if (activeJobs.has(id)) return;
-  activeJobs.add(id);
-  try {
-    const result = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [id]);
-    const job = result.rows[0];
-    if (!job || job.source_type === 'zip' || job.parent_job_id || ['completed', 'failed'].includes(job.status)) return;
-    if (!job.fal_request_id) {
-      await updateJob(id, { status: 'queued', progress: 8, message: 'Preparing a secure audio hand-off to FAL…' });
-      await submitFalJob(job);
-      return;
-    }
-    const statusResponse = await fetch(job.fal_status_url, {
-      headers: { Authorization: 'Key ' + FAL_API_KEY },
-      signal: AbortSignal.timeout(20000)
-    });
-    const status = await statusResponse.json().catch(() => ({}));
-    if (!statusResponse.ok) throw new Error(status.detail || 'FAL status check failed (' + statusResponse.status + ').');
-    if (status.status === 'COMPLETED') {
-      await updateJob(id, { progress: 88, message: 'Separation complete. Saving your stems to private storage…' });
-      await finishFalJob(job);
-    } else if (status.status === 'FAILED') {
-      throw new Error(status.error || 'FAL could not separate this audio.');
-    } else {
-      const progress = status.status === 'IN_PROGRESS' ? 55 : 24;
-      await updateJob(id, {
-        status: 'processing',
-        progress,
-        message: status.status === 'IN_PROGRESS' ? 'Demucs is separating the six audio layers…' : 'Your audio is in the FAL processing queue…'
-      });
-    }
-  } catch (error) {
-    console.error('STEM FAL job failed:', id, error.message);
-    await updateJob(id, {
-      status: 'failed',
-      progress: 100,
-      message: error.message || 'Audio processing failed.',
-      error: error.stack || error.message
-    }).catch(dbError => console.error('Could not persist FAL failure:', dbError.message));
-  } finally {
-    activeJobs.delete(id);
-  }
-}
+
+
+
 
 app.get('/health', asyncRoute(async (_req, res) => {
   await pool.query('SELECT 1');
-  // Verify the configured Neon S3 credentials and private bucket, not just env presence.
   const storageProbeKey = 'health-checks/' + randomUUID() + '.txt';
   await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: storageProbeKey, Body: 'STEM storage connection check', ContentType: 'text/plain' }));
   await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: storageProbeKey }));
-  res.json({
-    ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && FAL_API_KEY),
-    service: 'STEM Audio Workbench',
-    version: '3.0.0',
-    database: 'connected',
-    objectStorage: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY),
-    falConfigured: Boolean(FAL_API_KEY),
-    bucket: BUCKET
-  });
+  res.json({ ok: Boolean(process.env.AWS_ENDPOINT_URL_S3 && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY), service: 'STEM Audio Workbench', version: '4.0.0', database: 'connected', objectStorage: true, processing: 'local-demucs-with-optional-free-cloud-worker', bucket: BUCKET });
 }));
 
 app.get('/api/capabilities', (_req, res) => res.json({
-  engine: 'FAL Demucs',
-  model: MODEL,
-  sources: ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'],
-  formats: ['wav', 'mp3'],
-  maxUploadMB: MAX_UPLOAD_MB,
-  zipUploads: true,
-  maxZipTracks: MAX_ZIP_TRACKS,
-  maxZipUnpackedMB: MAX_ZIP_UNPACKED_MB,
-  persistentJobs: true,
-  objectStorage: 'Neon Object Storage',
-  note: 'Source separation is an estimate. Complex mixes may contain bleed between stems.'
+  engine: 'Open-source Demucs', model: MODEL, providers: ['local-device', 'optional-free-cloud-worker'],
+  sources: ['vocals', 'drums', 'bass', 'other', 'guitar', 'piano'], formats: ['wav', 'mp3'],
+  maxUploadMB: MAX_UPLOAD_MB, zipUploads: true, maxZipTracks: MAX_ZIP_TRACKS,
+  maxZipUnpackedMB: MAX_ZIP_UNPACKED_MB, persistentJobs: true, objectStorage: 'Neon Object Storage',
+  note: 'Local processing has no per-track API fee. Optional free cloud capacity is quota-limited and may be unavailable.'
 }));
 
+app.post('/api/jobs/local', asyncRoute(async (req, res) => {
+  const id = randomUUID();
+  const originalName = safeName(String(req.body?.name || 'audio.wav'));
+  const outputFormat = req.body?.outputFormat === 'mp3' ? 'mp3' : 'wav';
+  const sourceType = req.body?.sourceType === 'zip' ? 'zip' : 'audio';
+  const sizeBytes = Math.max(0, Number(req.body?.sizeBytes || 0));
+  if (!sizeBytes || sizeBytes > MAX_UPLOAD_MB * 1024 * 1024) return res.status(400).json({ error: 'The selected file is empty or exceeds the upload limit.' });
+  await pool.query(
+    "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',3,'Job saved. Waiting for a free Demucs processor…','',$3,$4,$5,$6,$7)",
+    [id, originalName, MODEL, outputFormat, sizeBytes, String(req.body?.contentType || 'application/octet-stream'), sourceType]
+  );
+  res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id, processor: 'local-demucs' });
+}));
 
+// Backwards-compatible upload endpoint. It stores jobs but never invokes a paid processor.
 app.post('/api/jobs', uploadLimiter, upload.single('audio'), asyncRoute(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Choose an audio file or ZIP package first.' });
-  const id = randomUUID();
-  const originalName = safeName(req.file.originalname);
+  const id = randomUUID(), originalName = safeName(req.file.originalname);
   const ext = path.extname(originalName).toLowerCase() || '.audio';
   const inputKey = 'uploads/' + id + '/original' + ext;
   const outputFormat = req.body.outputFormat === 'mp3' ? 'mp3' : 'wav';
-  const isZip = ext === '.zip';
-  let extractedDir;
   try {
     await uploadFile(inputKey, req.file.path, req.file.mimetype || 'application/octet-stream');
-    if (isZip) {
-      extractedDir = path.join(DATA_DIR, 'extract-' + id);
-      const tracks = await extractZipAudioFiles(req.file.path, extractedDir);
-      await pool.query(
-        "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',3,'ZIP uploaded. Preparing audio tracks…',$3,$4,$5,$6,$7,'zip')",
-        [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/zip']
-      );
-      for (const track of tracks) {
-        const childId = randomUUID();
-        const trackExt = path.extname(track.originalName).toLowerCase();
-        const childKey = 'uploads/' + id + '/tracks/' + childId + trackExt;
-        await uploadFile(childKey, track.localPath, 'application/octet-stream');
-        const stat = await fs.promises.stat(track.localPath);
-        await pool.query(
-          "INSERT INTO public.stem_jobs (id, parent_job_id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,$3,'queued',3,'Track extracted. Waiting for FAL Demucs…',$4,$5,$6,$7,$8,'audio')",
-          [childId, id, track.originalName, childKey, MODEL, outputFormat, stat.size, 'application/octet-stream']
-        );
-      }
-    } else {
-      await pool.query(
-        "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',5,'Upload stored securely. Preparing FAL Demucs…',$3,$4,$5,$6,$7,'audio')",
-        [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream']
-      );
-    }
-  } finally {
-    await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
-    if (extractedDir) await fs.promises.rm(extractedDir, { recursive: true, force: true }).catch(() => {});
-  }
+    await pool.query(
+      "INSERT INTO public.stem_jobs (id, original_name, status, progress, message, input_key, model, output_format, input_size_bytes, input_content_type, source_type) VALUES ($1,$2,'queued',3,'Upload saved. Waiting for a free Demucs processor…',$3,$4,$5,$6,$7,$8)",
+      [id, originalName, inputKey, MODEL, outputFormat, req.file.size, req.file.mimetype || 'application/octet-stream', ext === '.zip' ? 'zip' : 'audio']
+    );
+  } finally { await fs.promises.rm(req.file.path, { force: true }).catch(() => {}); }
   res.status(202).json({ id, status: 'queued', statusUrl: '/api/jobs/' + id });
-  if (isZip) void processZipJob(id);
-  else void processFalJob(id);
 }));
 
 app.get('/api/jobs/:id', asyncRoute(async (req, res) => {
   const result = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
   const job = result.rows[0];
   if (!job) return res.status(404).json({ error: 'Job not found.' });
-  if (['queued', 'processing'].includes(job.status)) {
-    if (job.source_type === 'zip') void processZipJob(job.id);
-    else if (!job.parent_job_id) void processFalJob(job.id);
+  res.json(publicJob(job));
+}));
+
+app.post('/api/jobs/:id/local-result', resultUpload.single('archive'), asyncRoute(async (req, res) => {
+  const jobResult = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [req.params.id]);
+  const job = jobResult.rows[0];
+  if (!job) return res.status(404).json({ error: 'Job not found.' });
+  if (!req.file) return res.status(400).json({ error: 'The processor did not return a result archive.' });
+  if (job.status === 'completed') return res.status(409).json({ error: 'This job already has completed results.' });
+  const workDir = path.join(DATA_DIR, 'result-' + job.id + '-' + randomUUID());
+  await fs.promises.mkdir(workDir, { recursive: true });
+  try {
+    const directory = await unzipper.Open.file(req.file.path);
+    const entries = directory.files.filter(entry => entry.type === 'File' && AUDIO_EXTENSIONS.has(path.extname(entry.path).toLowerCase()));
+    if (!entries.length || entries.length > 120) throw new Error('The result archive has no valid stems or contains too many files.');
+    const archiveKey = 'results/' + job.id + '/stem-results.zip';
+    await uploadFile(archiveKey, req.file.path, 'application/zip');
+    const manifestFiles = [];
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const safeParts = entry.path.split('/').filter(part => part && part !== '.' && part !== '..').map(safeName);
+      const relativeName = safeParts.join('/');
+      const localPath = path.join(workDir, String(index).padStart(3, '0') + '-' + safeName(path.basename(relativeName)));
+      await pipeline(entry.stream(), fs.createWriteStream(localPath));
+      const objectKey = 'results/' + job.id + '/' + relativeName;
+      const contentType = path.extname(relativeName).toLowerCase() === '.mp3' ? 'audio/mpeg' : 'audio/wav';
+      await uploadFile(objectKey, localPath, contentType);
+      const stat = await fs.promises.stat(localPath);
+      manifestFiles.push({ track: safeParts.length > 1 ? safeParts.slice(0, -1).join('/') : null, stem: path.parse(relativeName).name, fileName: relativeName, objectKey, sizeBytes: stat.size, contentType });
+    }
+    const files = await Promise.all(manifestFiles.map(async file => ({
+      ...file, downloadUrl: await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: file.objectKey }), { expiresIn: 60 * 60 })
+    })));
+    await updateJob(job.id, {
+      status: 'completed', progress: 100, message: 'Your stems are ready. Processed with open-source Demucs.',
+      result_key: archiveKey, result_manifest: { model: MODEL, processor: 'local-demucs', outputFormat: job.output_format || 'wav', files }, completed_at: new Date()
+    });
+    res.json({ id: job.id, status: 'completed', results: files.length });
+  } finally {
+    await fs.promises.rm(req.file.path, { force: true }).catch(() => {});
+    await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
-  const fresh = await pool.query('SELECT * FROM public.stem_jobs WHERE id = $1', [job.id]);
-  res.json(publicJob(fresh.rows[0]));
 }));
 
 app.get('/api/jobs/:id/results', asyncRoute(async (req, res) => {
@@ -548,7 +310,7 @@ app.get('/api/jobs/:id/download', asyncRoute(async (req, res) => {
 
 app.use((err, _req, res, _next) => {
   console.error('STEM API error:', err.message);
-  const status = err instanceof multer.MulterError ? 413 : 400;
+  const status = err instanceof multer.MulterError ? 413 : (err.status || 400);
   res.status(status).json({ error: err.message || 'Request failed.' });
 });
 
@@ -579,6 +341,7 @@ async function start() {
     fal_request_id TEXT,
     fal_status_url TEXT,
     fal_response_url TEXT,
+    processor TEXT NOT NULL DEFAULT 'legacy',
     output_format TEXT NOT NULL DEFAULT 'wav',
     input_size_bytes BIGINT,
     input_content_type TEXT,
@@ -587,22 +350,8 @@ async function start() {
   await pool.query('ALTER TABLE public.stem_jobs ADD COLUMN IF NOT EXISTS parent_job_id UUID REFERENCES public.stem_jobs(id) ON DELETE CASCADE');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_parent_job_idx ON public.stem_jobs (parent_job_id) WHERE parent_job_id IS NOT NULL');
   await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_status_created_idx ON public.stem_jobs (status, created_at)');
-  await pool.query('CREATE INDEX IF NOT EXISTS stem_jobs_fal_request_idx ON public.stem_jobs (fal_request_id) WHERE fal_request_id IS NOT NULL');
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log('STEM FAL API listening on ' + PORT);
-    setInterval(async () => {
-      const queued = await pool.query(
-        "SELECT id, source_type FROM public.stem_jobs WHERE parent_job_id IS NULL AND status IN ('queued','processing') ORDER BY created_at ASC LIMIT 20"
-      ).catch(error => {
-        console.error('Could not recover queued STEM jobs:', error.message);
-        return { rows: [] };
-      });
-      for (const row of queued.rows) {
-        if (row.source_type === 'zip') void processZipJob(row.id);
-        else void processFalJob(row.id);
-      }
-    }, 5000).unref();
-  });
+  app.listen(PORT, '0.0.0.0', () => { console.log('STEM free Demucs API listening on ' + PORT); });
+
 }
 
 start().catch(error => {
